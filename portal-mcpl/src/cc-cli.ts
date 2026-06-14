@@ -27,8 +27,9 @@
  *   }
  *
  * On first run it enrolls and caches credentials at PORTAL_CREDENTIALS
- * (default ~/.portal/cc-channel-creds.json); subsequent runs reuse them, so the
- * persona (and its Discord identity/role) is stable across restarts.
+ * (default ~/.portal/<persona-name>.creds.json, derived from PORTAL_PERSONA_NAME
+ * so distinct names get distinct identities automatically); subsequent runs reuse
+ * them, so the persona (and its Discord identity/role) is stable across restarts.
  *
  * Durable agent state (watermarks, pending pings, and channel SUBSCRIPTIONS) is
  * persisted at PORTAL_STATE (default ~/.portal/<personaId>.state.json). Channels
@@ -47,10 +48,13 @@ import { PortalCcChannelServer } from './server-cc.js';
 
 async function main(): Promise<void> {
   const url = process.env.PORTAL_URL ?? 'ws://127.0.0.1:8790';
-  const credsPath =
-    process.env.PORTAL_CREDENTIALS ?? join(homedir(), '.portal', 'cc-channel-creds.json');
-  const invite = process.env.PORTAL_INVITE;
   const desiredName = process.env.PORTAL_PERSONA_NAME ?? 'claude-code';
+  // Default creds/state filenames are derived from the persona name, so distinct
+  // PORTAL_PERSONA_NAME values get distinct identities without needing an explicit
+  // PORTAL_CREDENTIALS. PORTAL_CREDENTIALS still overrides when set.
+  const credsPath =
+    process.env.PORTAL_CREDENTIALS ?? join(homedir(), '.portal', `${slugName(desiredName)}.creds.json`);
+  const invite = process.env.PORTAL_INVITE;
   const subscriptions = (process.env.PORTAL_SUBSCRIPTIONS ?? '')
     .split(',')
     .map((s) => s.trim())
@@ -111,6 +115,11 @@ async function main(): Promise<void> {
 
   const conn = McplConnection.fromStreams(process.stdin, process.stdout);
   await server.serve(conn);
+}
+
+/** Slug a persona name into a safe filename stem. */
+function slugName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64) || 'agent';
 }
 
 main().catch((err) => {
