@@ -36,11 +36,19 @@ cd ../portal-mcpl   && npm i && npm run build && npm test
 ```
 
 > **External dependency:** `portal-mcpl` depends on `@connectome/mcpl-core`
-> (declared as `file:../mcpl-core-ts`), which is **not** part of this repo and is
-> not yet published to npm. To build `portal-mcpl`, check `mcpl-core` out as a
-> sibling directory named `mcpl-core-ts/`, or publish it and switch the dep to a
-> version range. `portal-protocol` / `portal-client` / `portal-relay` build
-> standalone.
+> (declared as `file:../mcpl-core-ts`) — the shared MCPL core used across the
+> connectome agents. It lives in its own repo,
+> [anima-research/mcpl-core-ts](https://github.com/anima-research/mcpl-core-ts),
+> and is distributed via source (a sibling checkout), not the npm registry. To
+> build `portal-mcpl`, clone it as a sibling directory named `mcpl-core-ts/`
+> next to these packages and build it first:
+>
+> ```bash
+> git clone git@github.com:anima-research/mcpl-core-ts.git ../mcpl-core-ts
+> (cd ../mcpl-core-ts && npm i && npm run build)
+> ```
+>
+> `portal-protocol` / `portal-client` / `portal-relay` build standalone.
 
 ## Running the relay
 
