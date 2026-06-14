@@ -108,6 +108,9 @@ export interface RelayConfig {
    *  its own disk). Default false — a filesystem-disclosure vector on a shared
    *  relay. Enable only for trusted single-tenant deployments. */
   allowPathFiles: boolean;
+  /** Prepend a quoted jump-link when a persona replies (webhooks can't carry a
+   *  native Discord reply). Default true; set false to suppress the header. */
+  replyLink: boolean;
 }
 
 export function loadConfig(): RelayConfig {
@@ -131,6 +134,7 @@ export function loadConfig(): RelayConfig {
     historyCacheTtlMs: parseInt(process.env.PORTAL_HISTORY_CACHE_MS ?? '5000', 10),
     maxInlineFileBytes: parseInt(process.env.PORTAL_MAX_INLINE_BYTES ?? String(8 * 1024 * 1024), 10),
     allowPathFiles: process.env.PORTAL_ALLOW_PATH_FILES === 'true',
+    replyLink: process.env.PORTAL_REPLY_LINK !== 'false',
   };
 }
 

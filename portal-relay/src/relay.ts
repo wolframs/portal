@@ -386,7 +386,8 @@ export class Relay implements GatewayHooks {
     }
 
     // Reply degrades to a quoted jump-link (webhooks can't carry native replies).
-    if (p.replyToId) {
+    // Suppressible via PORTAL_REPLY_LINK=false.
+    if (p.replyToId && this.config.replyLink) {
       const ref = await this.resolveRef(p.replyToId);
       if (ref && ref.guildId) {
         const link = `https://discord.com/channels/${ref.guildId}/${ref.threadId ?? ref.channelId}/${ref.discordMsgId}`;
