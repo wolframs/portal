@@ -10,7 +10,7 @@
 > param and the relay passes `config.rolePool.prefix` —
 > `this.bot.listRoles(p.guildId, this.config.rolePool.prefix)`. Exposed as the
 > `list_roles` MCPL tool too. Verified live (`scripts/p1-live.mjs`): 42 roles
-> against antra's guild, `@everyone` present, `pooled` true exactly for `portal-*`,
+> against a test guild, `@everyone` present, `pooled` true exactly for `portal-*`,
 > and every `PortalMember.roles[]` id resolves via the catalog.
 - **Protocol version:** folds into the RFC-001 minor bump (→ 0.2.0); purely additive
 - **Depends on:** nothing. **Blocks:** ChapterX portal-connector P3 (role-name auth).
@@ -132,7 +132,7 @@ return m ? m.roles.map((id) => nameById.get(id)).filter(Boolean) : null;
 - **Additive** — new method only; safe under the RFC-001 minor bump. Clients that
   ignore unknown methods are unaffected.
 - **Test (live, mirrors `scripts/p1-live.mjs`):** call `list_roles` against
-  antra's guild, assert the `@everyone` role and the pooled `portal-*` roles
+  a test guild, assert the `@everyone` role and the pooled `portal-*` roles
   appear, `pooled` is true exactly for the prefixed ones, and a known custom role
   resolves to its name. Cross-check: take a `PortalMember.roles[]` from
   `list_members` and confirm every id resolves via the `list_roles` catalog.

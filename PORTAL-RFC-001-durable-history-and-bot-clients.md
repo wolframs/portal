@@ -28,7 +28,7 @@
 >
 > **Verified:** offline unit tests (deterministic ids, attribution-survives-restart,
 > ownership safety, history-cache TTL/LRU/invalidate — `test/message-store.test.ts`,
-> `test/history-cache.test.ts`) **and** live against antra's server:
+> `test/history-cache.test.ts`) **and** live against a test guild:
 > `scripts/restart.mjs` (the P0 acceptance gate, incl. cross-persona edit rejected
 > after restart) and `scripts/p1-live.mjs` (member reads, mention resolution,
 > inbound edit→`message_update`, `list_pins`). Native reaction ingest is wired but
