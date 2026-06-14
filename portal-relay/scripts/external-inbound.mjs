@@ -13,7 +13,7 @@ import { PortalClient } from '../../portal-client/dist/src/index.js';
 const GUILD = '1289595876716707911';
 const channelId = process.argv[2] || '1314075962484457533'; // #test2
 const token = readFileSync(
-  new URL('../../chatperx/config/bots/strangesonnet45_discord_token', import.meta.url),
+  new URL('../../../chatperx/config/bots/strangesonnet45_discord_token', import.meta.url),
   'utf8',
 ).trim();
 const API = 'https://discord.com/api/v10';

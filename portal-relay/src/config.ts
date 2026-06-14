@@ -100,6 +100,14 @@ export interface RelayConfig {
   watchConfig: boolean;
   /** TTL (ms) for the fetch_history page cache; 0 disables (default 5000). */
   historyCacheTtlMs: number;
+  /** Max total decoded bytes of inline (base64) attachments per message
+   *  (default 8 MiB — the Discord non-boosted ceiling). Bounds the WS frame
+   *  and relay memory. */
+  maxInlineFileBytes: number;
+  /** Allow path-based attachments (the relay reads a client-supplied path off
+   *  its own disk). Default false — a filesystem-disclosure vector on a shared
+   *  relay. Enable only for trusted single-tenant deployments. */
+  allowPathFiles: boolean;
 }
 
 export function loadConfig(): RelayConfig {
@@ -121,6 +129,8 @@ export function loadConfig(): RelayConfig {
     guildMembersIntent: process.env.PORTAL_GUILD_MEMBERS_INTENT !== 'false',
     watchConfig: process.env.PORTAL_WATCH_CONFIG !== 'false',
     historyCacheTtlMs: parseInt(process.env.PORTAL_HISTORY_CACHE_MS ?? '5000', 10),
+    maxInlineFileBytes: parseInt(process.env.PORTAL_MAX_INLINE_BYTES ?? String(8 * 1024 * 1024), 10),
+    allowPathFiles: process.env.PORTAL_ALLOW_PATH_FILES === 'true',
   };
 }
 

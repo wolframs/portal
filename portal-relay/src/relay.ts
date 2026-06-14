@@ -43,6 +43,8 @@ export class Relay implements GatewayHooks {
   constructor(private config: RelayConfig) {
     this.bot = new DiscordBot(config.discordToken, config.guildIds, {
       guildMembersIntent: config.guildMembersIntent,
+      maxInlineTotalBytes: config.maxInlineFileBytes,
+      allowPathFiles: config.allowPathFiles,
     });
     this.store = new MessageStore({ path: config.attributionPath });
     this.history = new HistoryCache(config.historyCacheTtlMs);

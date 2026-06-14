@@ -11,15 +11,18 @@ export interface ToolDefinition {
 
 const FILES_PROP = {
   type: 'array',
-  description: 'Optional file attachments (local paths on the host). Up to 10.',
+  description:
+    'Optional file attachments (up to 10; ~8 MiB total). Provide each file as ' +
+    'inline base64 `bytes` (preferred — works from anywhere) with a `name`.',
   items: {
     type: 'object',
     properties: {
-      path: { type: 'string', description: 'Absolute local path to upload' },
-      name: { type: 'string', description: 'Optional display filename' },
+      bytes: { type: 'string', description: 'Base64-encoded file content (preferred)' },
+      name: { type: 'string', description: 'Display filename (required with bytes)' },
+      contentType: { type: 'string', description: 'Optional MIME type' },
+      path: { type: 'string', description: 'Path the relay can read (only if the relay allows path files)' },
       description: { type: 'string', description: 'Optional alt-text' },
     },
-    required: ['path'],
   },
 };
 

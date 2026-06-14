@@ -3,10 +3,21 @@ import type { ChannelId, GuildId, PersonaId, RelayMessageId, RpcId, ThreadId, Us
 import type { PortalMessage } from './message.js';
 import type { PortalMember, PortalRole } from './members.js';
 
-/** A file to upload, read from a local path on the host running the client. */
+/**
+ * A file to upload. Provide EXACTLY ONE source:
+ *  - `bytes`: base64-encoded content (preferred — works from any client/host).
+ *  - `path`:  a path the RELAY can read (co-located/trusted clients only;
+ *             disabled by default on the relay, see `allowPathFiles`).
+ */
 export interface OutgoingFile {
-  path: string;
+  /** Display filename. Required when using `bytes` (no basename to infer). */
   name?: string;
+  /** Base64-encoded file content. */
+  bytes?: string;
+  /** A path on the relay host. Discouraged — filesystem-disclosure vector. */
+  path?: string;
+  /** Optional MIME type (Discord mostly infers from `name`). */
+  contentType?: string;
   description?: string;
 }
 

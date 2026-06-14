@@ -10,7 +10,7 @@ import { PortalClient } from '../../portal-client/dist/src/index.js';
 
 const GUILD = '1289595876716707911';
 const CH = process.argv[2] || '1314075947724705843'; // #test1
-const token = readFileSync(new URL('../../chatperx/config/bots/strangesonnet45_discord_token', import.meta.url), 'utf8').trim();
+const token = readFileSync(new URL('../../../chatperx/config/bots/strangesonnet45_discord_token', import.meta.url), 'utf8').trim();
 const idPath = '/tmp/portal-id.json';
 const permPath = '/tmp/portal-perm.json';
 copyFileSync(new URL('../identity.test.json', import.meta.url), idPath);

@@ -9,7 +9,7 @@ import { PortalClient } from '../../portal-client/dist/src/index.js';
 
 const GUILD = '1289595876716707911';
 const CH = process.argv[2] || '1314075947724705843'; // #test1
-const token = readFileSync(new URL('../../chatperx/config/bots/strangesonnet45_discord_token', import.meta.url), 'utf8').trim();
+const token = readFileSync(new URL('../../../chatperx/config/bots/strangesonnet45_discord_token', import.meta.url), 'utf8').trim();
 const API = 'https://discord.com/api/v10';
 const auth = { Authorization: `Bot ${token}`, 'Content-Type': 'application/json' };
 const log = (...a) => console.log('[p1]', ...a);
@@ -63,6 +63,21 @@ async function main() {
   const pooledOk = roles.every((r) => r.pooled === r.name.startsWith('portal-')) && roles.some((r) => r.pooled);
   const memberRolesResolve = sample ? sample.roles.every((id) => roles.some((r) => r.id === id)) : true;
   log('RFC-002 list_roles:', `${roles.length} roles; @everyone:${hasEveryone ? '✅' : '❌'} pooled-flag:${pooledOk ? '✅' : '❌'} member-roleIds-resolve:${memberRolesResolve ? '✅' : '❌'}`);
+
+  // RFC-003: inline (base64) attachment upload + path-files rejection.
+  const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+  const up = await lena.sendMessage({ channelId: CH, content: 'rfc-003 inline png', files: [{ name: 'dot.png', bytes: PNG, contentType: 'image/png' }] });
+  await new Promise((r) => setTimeout(r, 1500));
+  const h = await lena.fetchHistory({ channelId: CH, limit: 3 });
+  const att = h.messages.find((m) => m.id === up.messageId)?.attachments?.[0];
+  log('RFC-003 inline bytes upload:', att && att.name === 'dot.png' ? `✅ (${att.name}, ${att.size}B)` : '❌');
+  let pathRejected = false;
+  try {
+    await lena.sendMessage({ channelId: CH, content: 'x', files: [{ path: '/etc/passwd' }] });
+  } catch (e) {
+    pathRejected = e.code === 'INVALID_PARAMS' || /disabled/.test(String(e.message));
+  }
+  log('RFC-003 path-files rejected (default-off):', pathRejected ? '✅' : '❌');
 
   // External webhook post (so the relay sees a non-owned message it can edit-track).
   const wh = await api('POST', `/channels/${CH}/webhooks`, { name: 'P1Outsider' });

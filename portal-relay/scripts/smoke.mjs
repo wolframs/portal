@@ -13,7 +13,7 @@ import { PortalClient } from '../../portal-client/dist/src/index.js';
 const GUILD = '1289595876716707911'; // antra's server
 const channelId = process.argv[2] || '1289659411270209609'; // #test
 const token = readFileSync(
-  new URL('../../chatperx/config/bots/strangesonnet45_discord_token', import.meta.url),
+  new URL('../../../chatperx/config/bots/strangesonnet45_discord_token', import.meta.url),
   'utf8',
 ).trim();
 

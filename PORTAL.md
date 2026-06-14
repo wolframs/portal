@@ -79,7 +79,7 @@ Gotchas: channels resolve servers **by name** so the server must be *configured*
 | Text messages | ✅ | ✅ |
 | Replies | ✅ (quoted jump-link; webhooks lack native reply) | ✅ `replyToId` resolved |
 | Threads | ✅ (parent webhook + threadId) | ✅ as channels w/ parentId |
-| Images / files | ✅ `send_message.files` | ✅ **inlined as MCPL image blocks** (≤5MB, base64) + notes for non-images |
+| Images / files | ✅ `send_message.files` via inline **base64 `bytes`** (RFC-003; path-files default-off) | ✅ **inlined as MCPL image blocks** (≤5MB, base64) + notes for non-images |
 | Mentions | ✅ persona→role; human `@name`→`<@id>` (bot has GuildMembers intent) | ✅ role→persona routing + full `mentions` |
 | Reactions | ✅ pseudo + visible | ✅ native `reaction_add`/`reaction_remove` (RFC A3) |
 | Typing | ✅ bot-level (anonymous — not per-persona) | n/a |

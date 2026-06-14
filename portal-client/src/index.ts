@@ -11,3 +11,4 @@ export { ClientCache } from './cache.js';
 export { TypedEmitter } from './emitter.js';
 export { enroll, loadOrEnrollCreds } from './enroll.js';
 export type { EnrollOptions, PortalCredentials } from './enroll.js';
+export { fileFromBytes } from './files.js';

@@ -119,12 +119,16 @@ export class DiscordBot implements WebhookOps, RoleOps {
   private webhookCache = new Map<string, Webhook>(); // webhookId → Webhook
 
   private guildMembersIntent: boolean;
+  private maxInlineTotalBytes: number;
+  private allowPathFiles: boolean;
 
   constructor(
     private token: string,
     private guildIds: string[],
-    opts: { guildMembersIntent?: boolean } = {},
+    opts: { guildMembersIntent?: boolean; maxInlineTotalBytes?: number; allowPathFiles?: boolean } = {},
   ) {
+    this.maxInlineTotalBytes = opts.maxInlineTotalBytes ?? 8 * 1024 * 1024;
+    this.allowPathFiles = opts.allowPathFiles ?? false;
     // GuildMembers is privileged and must be enabled in the dev portal. It only
     // powers eager @name → <@id> resolution for inactive members, so it's
     // optional — without it the member cache fills opportunistically from
@@ -209,7 +213,10 @@ export class DiscordBot implements WebhookOps, RoleOps {
   }
 
   async sendWebhook(webhookId: string, opts: WebhookSendOpts): Promise<{ messageId: string }> {
-    const files = buildAttachments(opts.files);
+    const files = buildAttachments(opts.files, {
+      maxTotalBytes: this.maxInlineTotalBytes,
+      allowPath: this.allowPathFiles,
+    });
     const sent = await this.webhook(webhookId).send({
       content: opts.content || undefined,
       username: opts.username,
@@ -663,14 +670,48 @@ export class DiscordBot implements WebhookOps, RoleOps {
   }
 }
 
-function buildAttachments(files?: WebhookSendOpts['files']): AttachmentBuilder[] {
+/** An error that surfaces to the client as INVALID_PARAMS (not INTERNAL). */
+function invalidFile(message: string): Error & { code: string } {
+  return Object.assign(new Error(message), { code: 'INVALID_PARAMS' });
+}
+
+/**
+ * Turn OutgoingFile[] into discord.js attachments. Inline `bytes` (base64) is
+ * the primary path; filesystem `path` is gated behind `allowPath` (default off
+ * — it lets a client read the relay host's disk). `maxTotalBytes` bounds the
+ * decoded total *per message* (matches Discord's per-message upload cap and
+ * keeps the WS frame + memory bounded).
+ */
+export function buildAttachments(
+  files: WebhookSendOpts['files'],
+  limits: { maxTotalBytes: number; allowPath: boolean },
+): AttachmentBuilder[] {
   if (!files?.length) return [];
-  if (files.length > MAX_ATTACH) throw new Error(`Too many files (max ${MAX_ATTACH})`);
-  return files.map((f) => {
-    if (!f?.path || !existsSync(f.path) || !statSync(f.path).isFile()) {
-      throw new Error(`File not found: ${f?.path}`);
+  if (files.length > MAX_ATTACH) throw invalidFile(`Too many files (max ${MAX_ATTACH})`);
+  let total = 0;
+  const charge = (n: number) => {
+    total += n;
+    if (total > limits.maxTotalBytes) {
+      throw invalidFile(`attachments exceed ${limits.maxTotalBytes} bytes total`);
     }
-    const a = new AttachmentBuilder(f.path, { name: f.name || basename(f.path) });
+  };
+  return files.map((f) => {
+    if (!f || (f.bytes == null) === (f.path == null)) {
+      throw invalidFile('each file needs exactly one of `bytes` or `path`');
+    }
+    if (f.bytes != null) {
+      if (!f.name) throw invalidFile('inline (bytes) file requires a `name`');
+      const buf = Buffer.from(f.bytes, 'base64');
+      charge(buf.length);
+      const a = new AttachmentBuilder(buf, { name: f.name });
+      if (f.description) a.setDescription(f.description);
+      return a;
+    }
+    // path-based — disclosure vector, off by default
+    if (!limits.allowPath) throw invalidFile('path-based files are disabled on this relay (use `bytes`)');
+    if (!existsSync(f.path!) || !statSync(f.path!).isFile()) throw invalidFile(`File not found: ${f.path}`);
+    charge(statSync(f.path!).size);
+    const a = new AttachmentBuilder(f.path!, { name: f.name || basename(f.path!) });
     if (f.description) a.setDescription(f.description);
     return a;
   });

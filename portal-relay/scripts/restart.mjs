@@ -35,7 +35,7 @@ function waitPortFree(port, timeoutMs = 10000) {
 
 const GUILD = '1289595876716707911';
 const CH = process.argv[2] || '1289659411270209609'; // #test
-const token = readFileSync(new URL('../../chatperx/config/bots/strangesonnet45_discord_token', import.meta.url), 'utf8').trim();
+const token = readFileSync(new URL('../../../chatperx/config/bots/strangesonnet45_discord_token', import.meta.url), 'utf8').trim();
 const ATTR = '/tmp/portal-attr.json';
 rmSync(ATTR, { force: true });
 const log = (...a) => console.log('[restart]', ...a);
