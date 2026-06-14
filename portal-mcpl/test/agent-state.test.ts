@@ -60,3 +60,27 @@ test('unreadByChannel summarizes with a preview', () => {
   assert.equal(u.count, 1);
   assert.match(u.lastPreview ?? '', /Bob: hello world/);
 });
+
+test('subscriptions: add/remove, dedupe, and onChange fires', () => {
+  const s = new AgentState();
+  let changes = 0;
+  s.onChange(() => changes++);
+  assert.equal(s.subscribe('c1'), true);
+  assert.equal(s.subscribe('c1'), false); // dedupe → no change
+  assert.equal(s.subscribe('c2'), true);
+  assert.deepEqual(s.subscriptionList().sort(), ['c1', 'c2']);
+  assert.equal(s.isSubscribed('c1'), true);
+  assert.equal(s.unsubscribe('c1'), true);
+  assert.equal(s.unsubscribe('c1'), false);
+  assert.deepEqual(s.subscriptionList(), ['c2']);
+  assert.equal(changes, 3); // c1 add, c2 add, c1 remove
+});
+
+test('subscriptions survive serialize/restore', () => {
+  const s = new AgentState();
+  s.subscribe('c1');
+  s.subscribe('c2');
+  s.markRead('c1', '2026-01-01T00:00:00Z');
+  const restored = AgentState.fromJSON(JSON.parse(JSON.stringify(s.toJSON())));
+  assert.deepEqual(restored.subscriptionList().sort(), ['c1', 'c2']);
+});

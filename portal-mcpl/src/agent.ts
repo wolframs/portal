@@ -38,6 +38,17 @@ export class PortalAgent {
       // An edit to a message we track refreshes its preview but isn't a new ping.
       this.state.ingest(e.message, false, e.reasons);
     });
+    // A transport `resume` restores the event stream but NOT the relay session's
+    // subscriptions (the new session starts empty). Reapply from durable state.
+    // The fresh-`identify` path already carries them via the client's replay set.
+    this.client.on('resumed', () => this.reapplySubscriptions());
+  }
+
+  /** Re-assert this agent's durable subscriptions on the live session. */
+  private reapplySubscriptions(): void {
+    for (const channelId of this.state.subscriptionList()) {
+      this.client.subscribe(channelId).catch(() => {});
+    }
   }
 
   private ingest(message: PortalMessage, addressedToMe: boolean, reasons: AddressReason[]): void {
@@ -82,12 +93,19 @@ export class PortalAgent {
           channelId: str(args.channelId),
           name: str(args.name),
         });
-      case 'subscribe_channel':
-        return this.client.subscribe(str(args.channelId));
-      case 'unsubscribe_channel':
-        return this.client.unsubscribe(str(args.channelId));
+      case 'subscribe_channel': {
+        const channelId = str(args.channelId);
+        this.state.subscribe(channelId); // durable; persisted via onChange
+        return this.client.subscribe(channelId);
+      }
+      case 'unsubscribe_channel': {
+        const channelId = str(args.channelId);
+        this.state.unsubscribe(channelId);
+        return this.client.unsubscribe(channelId);
+      }
       case 'list_subscriptions':
-        return this.client.call('list_subscriptions', {});
+        // Durable agent state is the source of truth (survives reconnect/restart).
+        return { channelIds: this.state.subscriptionList() };
       case 'list_members':
         return this.client.call('list_members', {
           guildId: str(args.guildId),

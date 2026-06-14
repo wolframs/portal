@@ -80,7 +80,9 @@ export class PortalClient extends TypedEmitter<PortalClientEvents> {
       personaId: options.personaId,
       rpcTimeoutMs: options.rpcTimeoutMs ?? 15_000,
       maxBackoffMs: options.maxBackoffMs ?? 30_000,
-      subscriptions: options.subscriptions,
+      // Kept as a mutable set so subscribe/unsubscribe stay durable across
+      // reconnects (identify replays this list).
+      subscriptions: options.subscriptions ? [...options.subscriptions] : [],
       wsFactory: options.wsFactory,
     };
   }
@@ -141,9 +143,12 @@ export class PortalClient extends TypedEmitter<PortalClientEvents> {
     return this.call('fetch_history', params);
   }
   subscribe(channelId: string) {
+    const subs = (this.opts.subscriptions ??= []);
+    if (!subs.includes(channelId)) subs.push(channelId);
     return this.call('subscribe_channel', { channelId });
   }
   unsubscribe(channelId: string) {
+    this.opts.subscriptions = (this.opts.subscriptions ?? []).filter((c) => c !== channelId);
     return this.call('unsubscribe_channel', { channelId });
   }
 

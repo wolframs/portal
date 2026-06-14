@@ -29,12 +29,20 @@
  * On first run it enrolls and caches credentials at PORTAL_CREDENTIALS
  * (default ~/.portal/cc-channel-creds.json); subsequent runs reuse them, so the
  * persona (and its Discord identity/role) is stable across restarts.
+ *
+ * Durable agent state (watermarks, pending pings, and channel SUBSCRIPTIONS) is
+ * persisted at PORTAL_STATE (default ~/.portal/<personaId>.state.json). Channels
+ * subscribed via the in-session tools (subscribe_channel) are saved here and
+ * reapplied on every (re)connect — so PORTAL_SUBSCRIPTIONS is just an optional
+ * first-run seed, not a per-launch requirement.
  */
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { McplConnection } from '@animalabs/mcpl-core';
 import { PortalClient, loadOrEnrollCreds } from '@connectome/portal-client';
 import { PortalAgent } from './agent.js';
+import { AgentState } from './agent-state.js';
 import { PortalCcChannelServer } from './server-cc.js';
 
 async function main(): Promise<void> {
@@ -52,13 +60,49 @@ async function main(): Promise<void> {
   const creds = await loadOrEnrollCreds({ url, credsPath, invite, desiredName });
   console.error(`[portal-cc] persona "${creds.personaId}" via ${url} (creds: ${credsPath})`);
 
+  // Durable agent state (watermarks + pending pings + subscriptions). Keyed to
+  // the persona so it survives restarts; subscriptions managed from inside the
+  // session via tools are persisted here and reapplied on (re)connect.
+  const statePath =
+    process.env.PORTAL_STATE ?? join(dirname(credsPath), `${creds.personaId}.state.json`);
+  let state: AgentState;
+  try {
+    state = existsSync(statePath)
+      ? AgentState.fromJSON(JSON.parse(readFileSync(statePath, 'utf8')))
+      : new AgentState();
+  } catch (err) {
+    console.error('[portal-cc] state load failed, starting fresh:', (err as Error).message);
+    state = new AgentState();
+  }
+
+  // PORTAL_SUBSCRIPTIONS is a one-time seed: fold it into durable state, then the
+  // state file is the source of truth from here on.
+  for (const ch of subscriptions) state.subscribe(ch);
+
+  // Persist state on change (debounced), plus a synchronous flush on exit.
+  let writeTimer: ReturnType<typeof setTimeout> | undefined;
+  const flush = (): void => {
+    clearTimeout(writeTimer);
+    try {
+      mkdirSync(dirname(statePath), { recursive: true });
+      writeFileSync(statePath, JSON.stringify(state.toJSON(), null, 2), { mode: 0o600 });
+    } catch (err) {
+      console.error('[portal-cc] state write failed:', (err as Error).message);
+    }
+  };
+  state.onChange(() => {
+    clearTimeout(writeTimer);
+    writeTimer = setTimeout(flush, 500);
+  });
+  for (const sig of ['SIGINT', 'SIGTERM'] as const) process.on(sig, () => { flush(); process.exit(0); });
+
   const client = new PortalClient({
     url,
     token: creds.token,
     personaId: creds.personaId,
-    subscriptions,
+    subscriptions: state.subscriptionList(), // identify replays these on (re)connect
   });
-  const agent = new PortalAgent(client);
+  const agent = new PortalAgent(client, { state });
   const server = new PortalCcChannelServer(client, agent);
 
   // Connect in the background; the MCP handshake proceeds regardless so Claude

@@ -28,6 +28,8 @@ export interface ChannelUnread {
 interface SerializedState {
   watermarks: Record<string, string>;
   pings: PendingPing[];
+  /** Channels this agent ambiently subscribes to (durable, survives restarts). */
+  subscriptions?: string[];
 }
 
 const PREVIEW_LEN = 140;
@@ -39,6 +41,18 @@ export class AgentState {
   /** channelId → unseen messages (above the watermark), oldest first. */
   private unseen = new Map<string, PortalMessage[]>();
   private pings: PendingPing[] = [];
+  /** Channels this agent ambiently subscribes to. Durable agent state — the
+   *  source of truth for what the relay session should be subscribed to. */
+  private subscriptions = new Set<string>();
+  private listeners: Array<() => void> = [];
+
+  /** Notify on any persistence-relevant change (watermark / ping / subscription). */
+  onChange(cb: () => void): void {
+    this.listeners.push(cb);
+  }
+  private emitChange(): void {
+    for (const cb of this.listeners) cb();
+  }
 
   /** Ingest a delivered message. Returns true if it created a new pending ping. */
   ingest(message: PortalMessage, addressedToMe: boolean, reasons: AddressReason[]): boolean {
@@ -53,9 +67,35 @@ export class AgentState {
 
     if (addressedToMe) {
       this.pings.push({ message, reasons, at: message.createdAt });
+      this.emitChange();
       return true;
     }
     return false;
+  }
+
+  // ── Subscriptions (durable) ──
+
+  /** Returns true if this changed the set. */
+  subscribe(channelId: string): boolean {
+    if (this.subscriptions.has(channelId)) return false;
+    this.subscriptions.add(channelId);
+    this.emitChange();
+    return true;
+  }
+
+  /** Returns true if this changed the set. */
+  unsubscribe(channelId: string): boolean {
+    if (!this.subscriptions.delete(channelId)) return false;
+    this.emitChange();
+    return true;
+  }
+
+  subscriptionList(): string[] {
+    return [...this.subscriptions];
+  }
+
+  isSubscribed(channelId: string): boolean {
+    return this.subscriptions.has(channelId);
   }
 
   /** Advance the watermark for a channel (optionally only up to a message),
@@ -71,6 +111,7 @@ export class AgentState {
       list.filter((m) => m.createdAt > cutoff),
     );
     this.pings = this.pings.filter((p) => p.message.channelId !== channelId || p.at > cutoff);
+    this.emitChange();
   }
 
   pendingPings(): PendingPing[] {
@@ -80,6 +121,7 @@ export class AgentState {
   /** Remove a specific ping (e.g. once the agent replies to it). */
   clearPing(messageId: string): void {
     this.pings = this.pings.filter((p) => p.message.id !== messageId);
+    this.emitChange();
   }
 
   unreadByChannel(): ChannelUnread[] {
@@ -103,13 +145,18 @@ export class AgentState {
   }
 
   toJSON(): SerializedState {
-    return { watermarks: Object.fromEntries(this.watermarks), pings: this.pings };
+    return {
+      watermarks: Object.fromEntries(this.watermarks),
+      pings: this.pings,
+      subscriptions: [...this.subscriptions],
+    };
   }
 
   static fromJSON(data: SerializedState): AgentState {
     const s = new AgentState();
     s.watermarks = new Map(Object.entries(data.watermarks ?? {}));
     s.pings = data.pings ?? [];
+    s.subscriptions = new Set(data.subscriptions ?? []);
     return s;
   }
 }
