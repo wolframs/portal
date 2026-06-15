@@ -38,10 +38,48 @@ export interface PersonaPolicy {
   guilds?: Record<string, GuildPolicy>;
 }
 
+/**
+ * A grant's *scope* — which channels it applies in (RFC-004). Caps answer the
+ * "what may be done"; scope answers "where".
+ *   { channels } — explicit allow-list
+ *   { mirrorRole } — a Discord role id; scope = the channels that role can view
+ *   { all }       — every channel (admin-ish; use sparingly)
+ */
+export type Scope =
+  | { channels: string[] }
+  | { mirrorRole: string }
+  | { all: true };
+
+/**
+ * A named, reusable scoped-policy template (RFC-004 §5.4). Personas are assigned
+ * roles; effective permissions are the union (most-permissive) of their roles.
+ */
+export interface AccessRole {
+  caps: Capability[];
+  scope: Scope;
+  /** Bind to a guild — required for `mirrorRole`; omit for global. */
+  guildId?: string;
+}
+
+/**
+ * A persona's permissions entry. Either references reusable access roles, carries
+ * a legacy inline policy, or both (unioned). Backward-compatible: a bare
+ * `PersonaPolicy` (with `default`/`guilds`) in the file is read as `{ policy }`.
+ */
+export interface PersonaEntry {
+  roles?: string[];
+  policy?: PersonaPolicy;
+}
+
+/** What a persona looks like on disk — new entry shape or a legacy inline policy. */
+export type PersonaFileEntry = PersonaEntry | PersonaPolicy;
+
 export interface PermissionsFile {
   /** Fallback applied to personas with no entry of their own (default: deny). */
   default?: Capability[];
-  personas: Record<string, PersonaPolicy>;
+  /** Reusable access-role catalog (RFC-004 §5.4). */
+  roles?: Record<string, AccessRole>;
+  personas: Record<string, PersonaFileEntry>;
 }
 
 // ── Invites file ──
@@ -57,8 +95,25 @@ export interface InviteTemplate {
   code: string;
   /** Human label for the invite (e.g. "claude-code"). Optional. */
   label?: string;
-  /** Capability profile applied as the new persona's default policy. */
-  caps: Capability[];
+  /**
+   * Access-role names granted to the new persona (RFC-004, preferred). Mutually
+   * exclusive with `grant`. Resolution is live, so `mirrorRole` roles track
+   * Discord visibility over time.
+   */
+  roles?: string[];
+  /**
+   * Inline scoped grant (RFC-004). Mutually exclusive with `roles`. A
+   * `mirrorRole` scope here is snapshotted at enroll time into a channel list;
+   * use `roles` for live mirroring.
+   */
+  grant?: { caps: Capability[]; scope: Scope };
+  /** Guild the inline `grant`/scope applies to (required for non-`all` scopes). */
+  guildId?: string;
+  /**
+   * @deprecated Blanket capability profile applied to *every* channel. Honoured
+   * as `grant: { caps, scope: { all: true } }` with a warning — re-mint scoped.
+   */
+  caps?: Capability[];
   /** Channels the new persona is auto-subscribed to on enroll. */
   subscriptions?: string[];
   /** Prefix for minted persona ids (default derived from the display name). */

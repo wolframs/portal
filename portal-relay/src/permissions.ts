@@ -12,8 +12,33 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { PermissionsBitField } from 'discord.js';
 import type { GuildBasedChannel, GuildMember } from 'discord.js';
 import type { Capability } from '@connectome/portal-protocol';
-import type { GuildPolicy, PermissionsFile, PersonaPolicy } from './config.js';
+import type {
+  AccessRole,
+  GuildPolicy,
+  PermissionsFile,
+  PersonaEntry,
+  PersonaFileEntry,
+  PersonaPolicy,
+  Scope,
+} from './config.js';
 import { WatchedFile } from './file-watch.js';
+
+/** Mirror-visibility lookup: channel ids a Discord role can view in a guild. */
+export type MirrorVisibility = (guildId: string, roleId: string) => Set<string>;
+
+/** A bare PersonaPolicy on disk (legacy) lacks `roles`/`policy` keys. Normalise
+ *  it to the entry shape so the store always holds `PersonaEntry`. */
+function toEntry(raw: PersonaFileEntry): PersonaEntry {
+  if (raw && ('roles' in raw || 'policy' in raw)) return raw as PersonaEntry;
+  return { policy: raw as PersonaPolicy };
+}
+
+/** Inverse of {@link toEntry}: persist a policy-only entry in the legacy inline
+ *  shape (keeps existing files stable); use the new shape only when roles exist. */
+function fromEntry(e: PersonaEntry): PersonaFileEntry {
+  if (!e.roles?.length) return e.policy ?? { default: [] };
+  return e.policy ? { roles: e.roles, policy: e.policy } : { roles: e.roles };
+}
 
 export type PermissionChange = {
   personaId: string;
@@ -24,13 +49,21 @@ export type PermissionChange = {
 };
 
 export class PermissionsStore {
-  private personas = new Map<string, PersonaPolicy>();
+  private personas = new Map<string, PersonaEntry>();
+  private roles = new Map<string, AccessRole>();
   private fileDefault: Capability[] = [];
   private listeners: Array<(c: PermissionChange) => void> = [];
   private file?: WatchedFile;
+  private mirrorVisibility?: MirrorVisibility;
 
   constructor(private path: string) {
     this.reload();
+  }
+
+  /** Inject the live mirror-visibility lookup used to resolve `mirrorRole`
+   *  scopes. Absent ⇒ mirrorRole scopes resolve to deny (fail-closed). */
+  setMirrorVisibility(fn: MirrorVisibility): void {
+    this.mirrorVisibility = fn;
   }
 
   startWatching(): void {
@@ -50,10 +83,30 @@ export class PermissionsStore {
 
   // ── Resolution ──
 
-  /** The policy-level capability set (before ∩ Discord reality). */
+  /**
+   * The policy-level capability set (before ∩ Discord reality). The union
+   * (most-permissive) of every assigned access role whose scope includes this
+   * channel, plus any legacy inline policy. Default-deny: an entry with no
+   * matching role/scope resolves to the empty set.
+   */
   resolve(personaId: string, guildId: string | null, channelId: string): Set<Capability> {
-    const pol = this.personas.get(personaId);
-    if (!pol) return new Set(this.fileDefault);
+    const entry = this.personas.get(personaId);
+    if (!entry) return new Set(this.fileDefault);
+    const out = new Set<Capability>();
+    for (const name of entry.roles ?? []) {
+      const role = this.roles.get(name);
+      if (role && this.scopeIncludes(role.scope, role.guildId, guildId, channelId)) {
+        for (const c of role.caps) out.add(c);
+      }
+    }
+    if (entry.policy) {
+      for (const c of this.resolvePolicy(entry.policy, guildId, channelId)) out.add(c);
+    }
+    return out;
+  }
+
+  /** Legacy per-persona policy resolution: channel ?? guild-default ?? default. */
+  private resolvePolicy(pol: PersonaPolicy, guildId: string | null, channelId: string): Set<Capability> {
     if (guildId) {
       const g = pol.guilds?.[guildId];
       if (g) {
@@ -64,17 +117,55 @@ export class PermissionsStore {
     return new Set(pol.default);
   }
 
+  /** Does a scope grant apply in (guildId, channelId)? Fail-closed for mirrors. */
+  private scopeIncludes(
+    scope: Scope,
+    roleGuildId: string | undefined,
+    guildId: string | null,
+    channelId: string,
+  ): boolean {
+    if ('all' in scope) return scope.all === true;
+    if ('channels' in scope) return scope.channels.includes(channelId);
+    // mirrorRole: inherently per-guild; deny if no guild, cross-guild, or no lookup.
+    if (!guildId) return false;
+    if (roleGuildId && roleGuildId !== guildId) return false;
+    if (!this.mirrorVisibility) return false; // fail-closed: never a stale allow
+    return this.mirrorVisibility(guildId, scope.mirrorRole).has(channelId);
+  }
+
   getPolicy(personaId: string): PersonaPolicy | undefined {
-    return this.personas.get(personaId);
+    return this.personas.get(personaId)?.policy;
+  }
+
+  getRoleNames(personaId: string): string[] {
+    return this.personas.get(personaId)?.roles ?? [];
+  }
+
+  /** The access-role catalog (read-only view). */
+  getRole(name: string): AccessRole | undefined {
+    return this.roles.get(name);
   }
 
   // ── Mutations (persist + emit) ──
 
   setPersonaDefault(personaId: string, caps: Capability[]): void {
-    const pol = this.ensure(personaId);
-    pol.default = caps;
+    this.ensurePolicy(personaId).default = caps;
     this.persist();
     this.emit({ personaId, scope: 'default' });
+  }
+
+  /** Replace a persona's entire inline policy (RFC-004 scoped-grant enrollment). */
+  setPersonaPolicy(personaId: string, policy: PersonaPolicy): void {
+    this.ensure(personaId).policy = policy;
+    this.persist();
+    this.emit({ personaId, scope: 'reload' });
+  }
+
+  /** Assign access roles to a persona (RFC-004 role-based enrollment). */
+  setPersonaRoles(personaId: string, roles: string[]): void {
+    this.ensure(personaId).roles = roles;
+    this.persist();
+    this.emit({ personaId, scope: 'reload' });
   }
 
   setGuildDefault(personaId: string, guildId: string, caps: Capability[]): void {
@@ -92,7 +183,7 @@ export class PermissionsStore {
   }
 
   clearChannel(personaId: string, guildId: string, channelId: string): void {
-    const g = this.personas.get(personaId)?.guilds?.[guildId];
+    const g = this.personas.get(personaId)?.policy?.guilds?.[guildId];
     if (g?.channels) {
       delete g.channels[channelId];
       this.persist();
@@ -107,13 +198,17 @@ export class PermissionsStore {
     }
   }
 
-  private ensure(personaId: string): PersonaPolicy {
-    let pol = this.personas.get(personaId);
-    if (!pol) this.personas.set(personaId, (pol = { default: [] }));
-    return pol;
+  private ensure(personaId: string): PersonaEntry {
+    let e = this.personas.get(personaId);
+    if (!e) this.personas.set(personaId, (e = {}));
+    return e;
+  }
+  private ensurePolicy(personaId: string): PersonaPolicy {
+    const e = this.ensure(personaId);
+    return (e.policy ??= { default: [] });
   }
   private ensureGuild(personaId: string, guildId: string): GuildPolicy {
-    const pol = this.ensure(personaId);
+    const pol = this.ensurePolicy(personaId);
     pol.guilds ??= {};
     return (pol.guilds[guildId] ??= {});
   }
@@ -123,14 +218,24 @@ export class PermissionsStore {
   private reload(): void {
     const next = JSON.parse(readFileSync(this.path, 'utf8')) as PermissionsFile;
     const oldJson = new Map([...this.personas].map(([id, p]) => [id, JSON.stringify(p)]));
+    const oldRolesJson = JSON.stringify([...this.roles].sort());
     this.fileDefault = next.default ?? [];
-    this.personas = new Map(Object.entries(next.personas ?? {}));
+    this.roles = new Map(Object.entries(next.roles ?? {}));
+    this.personas = new Map(
+      Object.entries(next.personas ?? {}).map(([id, raw]) => [id, toEntry(raw)]),
+    );
     if (this.listeners.length) {
+      // A role-catalog edit can change effective caps for any persona that
+      // references a role, so treat such an entry as changed too.
+      const rolesChanged = JSON.stringify([...this.roles].sort()) !== oldRolesJson;
       const ids = new Set([...oldJson.keys(), ...this.personas.keys()]);
       for (const id of ids) {
         const before = oldJson.get(id);
         const after = this.personas.has(id) ? JSON.stringify(this.personas.get(id)) : undefined;
-        if (before !== after) this.emit({ personaId: id, scope: 'reload' });
+        const usesRoles = (this.personas.get(id)?.roles?.length ?? 0) > 0;
+        if (before !== after || (rolesChanged && usesRoles)) {
+          this.emit({ personaId: id, scope: 'reload' });
+        }
       }
     }
   }
@@ -138,7 +243,10 @@ export class PermissionsStore {
   private persist(): void {
     const data: PermissionsFile = {
       default: this.fileDefault.length ? this.fileDefault : undefined,
-      personas: Object.fromEntries(this.personas),
+      roles: this.roles.size ? Object.fromEntries(this.roles) : undefined,
+      personas: Object.fromEntries(
+        [...this.personas].map(([id, e]) => [id, fromEntry(e)]),
+      ),
     };
     const json = JSON.stringify(data, null, 2) + '\n';
     if (this.file) this.file.write(json);

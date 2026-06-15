@@ -167,14 +167,52 @@ scope is the operative gate). Most-permissive-wins across roles.
 For `scope: { mirrorRole: roleId }`, the relay computes the channel set from
 Discord itself: a channel is in scope iff
 `channel.permissionsFor(discordRole).has(ViewChannel)`. So an access role can mean
-*"exactly the channels the Discord @staff role can see."* The relay caches the
-computed set and refreshes on `channelUpdate` / `roleUpdate` (+ a periodic
-re-sync). `discord-bot.ts` already reads roles (RFC-002) and channel perms; this
-adds a `channelsVisibleToRole(guildId, roleId)` helper.
+*"exactly the channels the Discord @staff role can see."*
 
 Mirroring is what makes the admin bot safe: the bot *can* act anywhere, but each
 persona is gated to its mirrored role's visibility. A private channel is reachable
-only by personas whose mirrored Discord role can actually see it.
+only by personas whose mirrored Discord role can actually see it. This safety
+property depends entirely on the mirror set being **correct at resolve time** —
+hence the cache invariant below is load-bearing, not an optimisation detail.
+
+#### Cache + invalidation (push-event driven)
+
+`channel.permissionsFor(role)` reads two layers, and Discord pushes an event for
+each — **both arrive under the base `Guilds` intent the bot already requests**
+(`discord-bot.ts` line ~139; `listRoles` already documents that role data is
+always populated from this intent). No new or privileged intent is needed.
+
+| Layer that affects visibility | Event(s) | Already wired? |
+|---|---|---|
+| Per-channel permission overwrites | `channelCreate` / `channelUpdate` / `channelDelete` | **Yes** (`channelChange` / `channelDelete`) |
+| Role's guild-level permissions (incl. `@everyone`) | `roleCreate` / `roleUpdate` / `roleDelete` | **No — add (this RFC)** |
+
+The relay keeps a per-`(guildId, roleId)` cache of visible channel ids, computed
+lazily by a new `channelsVisibleToRole(guildId, roleId)` helper. Invalidation:
+
+- **`roleUpdate`/`roleCreate`/`roleDelete`** → drop the cache entry for that
+  `(guild, role)`. Position-only changes (role reordering) don't affect visibility
+  and can be skipped. `@everyone` updates arrive as a normal `roleUpdate` and must
+  bust **every** mirror entry in that guild (it underlies most baseline
+  visibility).
+- **`channelCreate`/`channelUpdate`/`channelDelete`** → an overwrite edit on one
+  channel can change visibility for *any* role, so invalidate **by guild** (drop
+  all role entries for that guild), not by a single role.
+
+#### Fail-closed invariant (required)
+
+Push events are necessary but **not sufficient**: events can be dropped across
+gateway reconnects/resumes, and `GUILD_ROLE_UPDATE` does not replay history. The
+resolver therefore must never serve a stale *allow*:
+
+> On resolve, if the mirror set for a `(persona → mirrorRole)` is **absent or
+> marked stale**, recompute it synchronously from `permissionsFor` (cheap; reads
+> warm cache) — **or deny**. Never fall back to a previously-cached allow.
+
+Push invalidation then makes the **periodic re-sync a backstop**, not the primary
+freshness mechanism — covering the missed-event/reconnect window rather than being
+relied on for correctness. On `ready`/reconnect, flush the whole mirror cache so
+the first resolve after a gap always recomputes.
 
 > v1 mirrors **visibility** (which channels) and applies the role's declared caps
 > within them. A later refinement could mirror finer-grained per-channel perms

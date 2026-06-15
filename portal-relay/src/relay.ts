@@ -18,13 +18,14 @@ import type {
   RpcRequest,
   RpcResponse,
 } from '@connectome/portal-protocol';
-import type { PersonaIdentity, RelayConfig } from './config.js';
+import type { InviteTemplate, PersonaIdentity, PersonaPolicy, RelayConfig, Scope } from './config.js';
 import { DiscordBot, type ChannelMeta, type IncomingMessage } from './discord-bot.js';
 import { Gateway, type GatewayHooks, Session } from './gateway.js';
 import { HistoryCache } from './history-cache.js';
 import { IdentityStore, type IdentityChange } from './identity.js';
 import { InviteStore } from './invites.js';
 import { MessageStore, makeRelayId, parseRelayId, type MessageRef } from './message-store.js';
+import { MirrorCache } from './mirror-cache.js';
 import { PermissionsStore, type PermissionChange, computeCapabilities } from './permissions.js';
 import { RolePool } from './role-pool.js';
 import { WebhookPool } from './webhook-pool.js';
@@ -39,6 +40,7 @@ export class Relay implements GatewayHooks {
   private store: MessageStore;
   private history: HistoryCache;
   private gateway: Gateway;
+  private mirror: MirrorCache;
 
   constructor(private config: RelayConfig) {
     this.bot = new DiscordBot(config.discordToken, config.guildIds, {
@@ -50,6 +52,10 @@ export class Relay implements GatewayHooks {
     this.history = new HistoryCache(config.historyCacheTtlMs);
     this.identity = new IdentityStore(config.identityPath, config.avatarBaseUrl);
     this.permissions = new PermissionsStore(config.permissionsPath);
+    // Mirror cache backs `mirrorRole` access-role scopes; inject the live lookup
+    // so resolve() can ask Discord which channels a role can see (RFC-004 §5.5).
+    this.mirror = new MirrorCache(this.bot);
+    this.permissions.setMirrorVisibility((g, r) => this.mirror.visible(g, r));
     if (config.invitesPath) this.invites = new InviteStore(config.invitesPath);
     this.roles = new RolePool(this.bot, config.rolePool.size, config.rolePool.prefix);
     this.webhooks = new WebhookPool(this.bot, config.webhookPoolSize);
@@ -63,6 +69,25 @@ export class Relay implements GatewayHooks {
     this.bot.on('reactionAdd', (r) => this.onReactionEvent('add', r));
     this.bot.on('reactionRemove', (r) => this.onReactionEvent('remove', r));
     this.bot.on('pinsUpdate', (channelId) => this.onPinsUpdate(channelId));
+    // Mirror-cache invalidation (RFC-004 §5.5): role perms → by role; channel
+    // overwrites → by guild (any role's visibility may shift); reconnect → flush.
+    this.bot.on('roleChange', (guildId, roleId) => {
+      this.mirror.invalidateRole(guildId, roleId);
+      this.repushGuildCaps(guildId);
+    });
+    this.bot.on('channelChange', (meta) => {
+      if (meta.guildId) {
+        this.mirror.invalidateGuild(meta.guildId);
+        this.repushGuildCaps(meta.guildId);
+      }
+    });
+    this.bot.on('channelDelete', (_channelId, guildId) => {
+      if (guildId) {
+        this.mirror.invalidateGuild(guildId);
+        this.repushGuildCaps(guildId);
+      }
+    });
+    this.bot.on('ready', () => this.mirror.clear());
     // Live identity/permission changes → wire events.
     this.identity.onChange((c) => void this.onIdentityChange(c).catch((e) => console.error('[portal-relay] identity change:', (e as Error).message)));
     this.permissions.onChange((c) => this.onPermissionChange(c));
@@ -131,6 +156,22 @@ export class Relay implements GatewayHooks {
     }
   }
 
+  /** Re-push capabilities for every connected persona across a guild's channels.
+   *  Used when a role/channel change may have shifted mirrorRole visibility. */
+  private repushGuildCaps(guildId: string): void {
+    const metas = this.bot.listChannelMetas(guildId);
+    if (!metas.length) return;
+    for (const personaId of this.gateway.activePersonas()) {
+      for (const meta of metas) {
+        this.gateway.dispatch(personaId, {
+          type: 'capabilities_update',
+          channelId: meta.id,
+          capabilities: this.capsFor(personaId, meta.id, guildId),
+        });
+      }
+    }
+  }
+
   // ── GatewayHooks ──
 
   authenticate(token: string, personaId: string): string | null {
@@ -158,7 +199,7 @@ export class Relay implements GatewayHooks {
       token,
     };
     this.identity.upsert(identity);
-    this.permissions.setPersonaDefault(personaId, checked.caps);
+    this.applyInviteGrant(personaId, checked);
     this.invites.consume(d.invite);
 
     // Carry the invite's default subscriptions through to this session.
@@ -168,6 +209,49 @@ export class Relay implements GatewayHooks {
 
     console.error(`[portal-relay] enrolled persona "${personaId}" via invite (${checked.label ?? d.invite})`);
     return { personaId, token, persona: this.identity.toPersona(identity) };
+  }
+
+  /**
+   * Translate an invite into the new persona's permissions (RFC-004). Prefers
+   * access roles (live resolution); else an inline scoped grant; else the
+   * deprecated blanket `caps` (honoured as scope:{all} with a warning). A grant
+   * with no scope-able guild, or an invite granting nothing, yields a
+   * default-deny entry.
+   */
+  private applyInviteGrant(personaId: string, inv: InviteTemplate): void {
+    if (inv.roles?.length) {
+      this.permissions.setPersonaRoles(personaId, inv.roles);
+      return;
+    }
+    let grant = inv.grant;
+    if (!grant && inv.caps?.length) {
+      console.error(
+        `[portal-relay] invite "${inv.label ?? inv.code}" uses deprecated blanket caps; ` +
+          `honouring as scope:{all}. Re-mint scoped (RFC-004).`,
+      );
+      grant = { caps: inv.caps, scope: { all: true } };
+    }
+    if (!grant) {
+      this.permissions.setPersonaPolicy(personaId, { default: [] }); // nothing granted → deny
+      return;
+    }
+    this.permissions.setPersonaPolicy(personaId, this.scopeToPolicy(inv.guildId, grant.scope, grant.caps));
+  }
+
+  /** Turn a (guild, scope, caps) grant into a default-deny PersonaPolicy. A
+   *  `mirrorRole` scope is snapshotted to its currently-visible channels (use an
+   *  access role for live mirroring). */
+  private scopeToPolicy(guildId: string | undefined, scope: Scope, caps: Capability[]): PersonaPolicy {
+    if ('all' in scope) return { default: caps };
+    if (!guildId) {
+      console.error('[portal-relay] scoped grant without guildId — denying (no channels in scope)');
+      return { default: [] };
+    }
+    const channelIds =
+      'channels' in scope ? scope.channels : [...this.bot.channelsVisibleToRole(guildId, scope.mirrorRole)];
+    const channels: Record<string, Capability[]> = {};
+    for (const id of channelIds) channels[id] = caps;
+    return { default: [], guilds: { [guildId]: { default: [], channels } } };
   }
 
   /** Slug a display name + short random suffix into a unique persona id. */
