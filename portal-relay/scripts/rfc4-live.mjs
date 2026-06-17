@@ -17,13 +17,21 @@ import { Relay } from '../dist/src/relay.js';
 import { PortalClient } from '../../portal-client/dist/src/index.js';
 import { enroll } from '../../portal-client/dist/src/enroll.js';
 
-const GUILD = '1289595876716707911';
-const PUB = '1314075947724705843'; // #test1 (public, @everyone can view)
+// Env-overridable so this runs on the server (admin bot) as well as the test
+// guild. RFC4_TOKEN_PATH points at the bot-token file; RFC4_GUILD / RFC4_PUB
+// select the guild + a public channel; RFC4_WS_PORT avoids clashing with a live
+// relay (default 8791, not the usual 8790).
+const GUILD = process.env.RFC4_GUILD ?? '1289595876716707911';
+const PUB = process.env.RFC4_PUB ?? '1314075947724705843'; // #test1 (public, @everyone can view)
+const PORT = parseInt(process.env.RFC4_WS_PORT ?? '8791', 10);
 const VIEW_CHANNEL = '1024'; // 1 << 10
-const token = readFileSync(new URL('../../../chatperx/config/bots/strangesonnet45_discord_token', import.meta.url), 'utf8').trim();
+const TOKEN_PATH = process.env.RFC4_TOKEN_PATH
+  ? new URL(process.env.RFC4_TOKEN_PATH, `file://${process.cwd()}/`)
+  : new URL('../../../chatperx/config/bots/strangesonnet45_discord_token', import.meta.url);
+const token = readFileSync(TOKEN_PATH, 'utf8').trim();
 const API = 'https://discord.com/api/v10';
 const auth = { Authorization: `Bot ${token}`, 'Content-Type': 'application/json' };
-const URL_WS = 'ws://127.0.0.1:8791';
+const URL_WS = `ws://127.0.0.1:${PORT}`;
 const log = (...a) => console.log('[rfc4]', ...a);
 const ts = process.argv[2] ?? String(process.hrtime.bigint()).slice(-6);
 
@@ -86,7 +94,7 @@ async function main() {
   }));
 
   const relay = new Relay({
-    discordToken: token, wsPort: 8791, avatarBaseUrl: '', guildIds: [GUILD],
+    discordToken: token, wsPort: PORT, avatarBaseUrl: '', guildIds: [GUILD],
     identityPath: IDENT, permissionsPath: PERMS, invitesPath: INV,
     attributionPath: '/tmp/rfc4-attr.json',
     rolePool: { size: 50, prefix: 'portal-' }, webhookPoolSize: 1,
