@@ -248,7 +248,11 @@ export class Relay implements GatewayHooks {
       return { default: [] };
     }
     const channelIds =
-      'channels' in scope ? scope.channels : [...this.bot.channelsVisibleToRole(guildId, scope.mirrorRole)];
+      'channels' in scope
+        ? scope.channels
+        : 'mirrorRoles' in scope
+          ? [...new Set(scope.mirrorRoles.flatMap((r) => [...this.bot.channelsVisibleToRole(guildId, r)]))]
+          : [...this.bot.channelsVisibleToRole(guildId, scope.mirrorRole)];
     const channels: Record<string, Capability[]> = {};
     for (const id of channelIds) channels[id] = caps;
     return { default: [], guilds: { [guildId]: { default: [], channels } } };

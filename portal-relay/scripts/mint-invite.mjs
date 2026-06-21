@@ -19,6 +19,10 @@
 //   # inline scoped grant — mirror a Discord role's visibility (snapshot at enroll):
 //   node scripts/mint-invite.mjs --file invites.json --guild <gid> --mirror-role <rid> --caps ...
 //
+//   # inline scoped grant — mirror the UNION of several roles' visibility:
+//   node scripts/mint-invite.mjs --file invites.json --guild <gid> --mirror-roles <rid>,<rid> --caps ...
+//   (for LIVE multi-role mirroring, prefer an access role with scope.mirrorRoles + --roles)
+//
 //   # whole-guild/global (admin-ish; use sparingly):
 //   node scripts/mint-invite.mjs --file invites.json --all --caps ...
 //
@@ -61,7 +65,7 @@ function describeGrant(inv) {
   if (inv.roles?.length) return `roles=${inv.roles.join(',')}`;
   if (inv.grant) {
     const s = inv.grant.scope;
-    const scope = s.all ? 'all' : s.channels ? `channels[${s.channels.length}]` : s.mirrorRole ? `mirror:${s.mirrorRole}` : '?';
+    const scope = s.all ? 'all' : s.channels ? `channels[${s.channels.length}]` : s.mirrorRoles ? `mirror[${s.mirrorRoles.length}]` : s.mirrorRole ? `mirror:${s.mirrorRole}` : '?';
     return `grant{${scope}} caps=${(inv.grant.caps ?? []).join(',')}`;
   }
   if (inv.caps?.length) return `BLANKET(deprecated) caps=${inv.caps.join(',')}`;
@@ -94,6 +98,7 @@ const expiresAt = expiresInDays
 const roles = (arg('roles') ?? '').split(',').map((s) => s.trim()).filter(Boolean);
 const channels = (arg('channels') ?? '').split(',').map((s) => s.trim()).filter(Boolean);
 const mirrorRole = arg('mirror-role');
+const mirrorRoles = (arg('mirror-roles') ?? '').split(',').map((s) => s.trim()).filter(Boolean);
 const guildId = arg('guild');
 
 // Resolve the grant form (RFC-004): roles | scoped grant | (opt-in) blanket.
@@ -105,14 +110,15 @@ if (roles.length) {
 } else if (flag('all')) {
   grantFields = { grant: { caps, scope: { all: true } } };
   summary = `grant{all} caps: ${caps.join(',')}`;
-} else if (channels.length || mirrorRole) {
+} else if (channels.length || mirrorRole || mirrorRoles.length) {
   if (!guildId) {
-    console.error('error: --guild <id> is required for --channels / --mirror-role scopes');
+    console.error('error: --guild <id> is required for --channels / --mirror-role / --mirror-roles scopes');
     process.exit(1);
   }
-  const scope = mirrorRole ? { mirrorRole } : { channels };
+  const scope = mirrorRoles.length ? { mirrorRoles } : mirrorRole ? { mirrorRole } : { channels };
   grantFields = { grant: { caps, scope }, guildId };
-  summary = `grant{${mirrorRole ? `mirror:${mirrorRole}` : `channels[${channels.length}]`}} guild:${guildId} caps: ${caps.join(',')}`;
+  const scopeDesc = mirrorRoles.length ? `mirror[${mirrorRoles.length}]` : mirrorRole ? `mirror:${mirrorRole}` : `channels[${channels.length}]`;
+  summary = `grant{${scopeDesc}} guild:${guildId} caps: ${caps.join(',')}`;
 } else if (flag('allow-blanket')) {
   console.error('warning: minting a DEPRECATED blanket-caps invite (every channel). Prefer --roles or a scope.');
   grantFields = { caps };

@@ -126,11 +126,14 @@ export class PermissionsStore {
   ): boolean {
     if ('all' in scope) return scope.all === true;
     if ('channels' in scope) return scope.channels.includes(channelId);
-    // mirrorRole: inherently per-guild; deny if no guild, cross-guild, or no lookup.
+    // mirror{Role,Roles}: inherently per-guild; deny if no guild, cross-guild, or no lookup.
     if (!guildId) return false;
     if (roleGuildId && roleGuildId !== guildId) return false;
-    if (!this.mirrorVisibility) return false; // fail-closed: never a stale allow
-    return this.mirrorVisibility(guildId, scope.mirrorRole).has(channelId);
+    const mv = this.mirrorVisibility;
+    if (!mv) return false; // fail-closed: never a stale allow
+    // Union: in scope iff ANY mirrored role can view the channel.
+    const roleIds = 'mirrorRoles' in scope ? scope.mirrorRoles : [scope.mirrorRole];
+    return roleIds.some((rid) => mv(guildId, rid).has(channelId));
   }
 
   getPolicy(personaId: string): PersonaPolicy | undefined {
