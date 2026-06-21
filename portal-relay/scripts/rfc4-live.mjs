@@ -25,10 +25,13 @@ const GUILD = process.env.RFC4_GUILD ?? '1289595876716707911';
 const PUB = process.env.RFC4_PUB ?? '1314075947724705843'; // #test1 (public, @everyone can view)
 const PORT = parseInt(process.env.RFC4_WS_PORT ?? '8791', 10);
 const VIEW_CHANNEL = '1024'; // 1 << 10
+// Token resolution: RFC4_TOKEN / DISCORD_TOKEN env (so the server can just
+// `source relay.env` — secret never written to a new file) → RFC4_TOKEN_PATH
+// file → the local test-bot token file.
 const TOKEN_PATH = process.env.RFC4_TOKEN_PATH
   ? new URL(process.env.RFC4_TOKEN_PATH, `file://${process.cwd()}/`)
   : new URL('../../../chatperx/config/bots/strangesonnet45_discord_token', import.meta.url);
-const token = readFileSync(TOKEN_PATH, 'utf8').trim();
+const token = (process.env.RFC4_TOKEN ?? process.env.DISCORD_TOKEN ?? readFileSync(TOKEN_PATH, 'utf8')).trim();
 const API = 'https://discord.com/api/v10';
 const auth = { Authorization: `Bot ${token}`, 'Content-Type': 'application/json' };
 const URL_WS = `ws://127.0.0.1:${PORT}`;
