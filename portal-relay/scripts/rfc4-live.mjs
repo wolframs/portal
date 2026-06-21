@@ -69,46 +69,46 @@ async function main() {
   // bot overwrite bits: VIEW(1024)|SEND(2048)|READ_HISTORY(65536) = 68608
   const me = await api('GET', '/users/@me');
   const BOT_ALLOW = '68608';
-
-  // ── Setup: a private channel hidden from @everyone but visible to the bot ──
-  const priv = await api('POST', `/guilds/${GUILD}/channels`, {
-    name: `rfc4-priv-${ts}`, type: 0,
-    permission_overwrites: [
-      { id: GUILD, type: 0, deny: VIEW_CHANNEL }, // hide from @everyone
-      { id: me.id, type: 1, allow: BOT_ALLOW }, // keep the (non-admin) bot's access
-    ],
-  });
-  log(`setup: priv=${priv.id} (mirroring @everyone=${GUILD})`);
-
-  // ── Config files (written before relay construction; watchConfig off) ──
-  writeFileSync(IDENT, JSON.stringify({ personas: [] }));
-  writeFileSync(PERMS, JSON.stringify({
-    roles: {
-      // Mirror @everyone: scope = exactly the channels @everyone can view.
-      rfc4staff: { caps: ['VIEW_CHANNEL', 'READ_HISTORY', 'SEND_MESSAGES'], scope: { mirrorRole: GUILD }, guildId: GUILD },
-    },
-    personas: {},
-  }));
-  writeFileSync(INV, JSON.stringify({
-    invites: [
-      { code: `scoped-pub-${ts}`, label: 'scoped', grant: { caps: ['VIEW_CHANNEL', 'READ_HISTORY', 'SEND_MESSAGES'], scope: { channels: [PUB] } }, guildId: GUILD, maxUses: 50 },
-      { code: `mirror-staff-${ts}`, label: 'mirror', roles: ['rfc4staff'], maxUses: 50 },
-    ],
-  }));
-
-  const relay = new Relay({
-    discordToken: token, wsPort: PORT, avatarBaseUrl: '', guildIds: [GUILD],
-    identityPath: IDENT, permissionsPath: PERMS, invitesPath: INV,
-    attributionPath: '/tmp/rfc4-attr.json',
-    rolePool: { size: 50, prefix: 'portal-' }, webhookPoolSize: 1,
-    // Members intent is privileged + unneeded here; default off so we don't get
-    // a disallowed-intent disconnect on bots that haven't enabled it.
-    heartbeatIntervalMs: 30000, guildMembersIntent: process.env.RFC4_MEMBERS_INTENT === 'true', watchConfig: false,
-    historyCacheTtlMs: 0, maxInlineFileBytes: 8 * 1024 * 1024, allowPathFiles: false, replyLink: true,
-  });
-
-  let guest, staff;
+  // Hoisted so the finally can clean up even if setup throws (an earlier version
+  // created resources outside try and orphaned them on a setup error).
+  let relay = null, priv = null, fresh = null, guest, staff;
   try {
+    // ── Config files (written before relay construction; watchConfig off) ──
+    writeFileSync(IDENT, JSON.stringify({ personas: [] }));
+    writeFileSync(PERMS, JSON.stringify({
+      roles: {
+        // Mirror @everyone: scope = exactly the channels @everyone can view.
+        rfc4staff: { caps: ['VIEW_CHANNEL', 'READ_HISTORY', 'SEND_MESSAGES'], scope: { mirrorRole: GUILD }, guildId: GUILD },
+      },
+      personas: {},
+    }));
+    writeFileSync(INV, JSON.stringify({
+      invites: [
+        { code: `scoped-pub-${ts}`, label: 'scoped', grant: { caps: ['VIEW_CHANNEL', 'READ_HISTORY', 'SEND_MESSAGES'], scope: { channels: [PUB] } }, guildId: GUILD, maxUses: 50 },
+        { code: `mirror-staff-${ts}`, label: 'mirror', roles: ['rfc4staff'], maxUses: 50 },
+      ],
+    }));
+
+    // ── A private channel hidden from @everyone but visible to the bot ──
+    priv = await api('POST', `/guilds/${GUILD}/channels`, {
+      name: `rfc4-priv-${ts}`, type: 0,
+      permission_overwrites: [
+        { id: GUILD, type: 0, deny: VIEW_CHANNEL }, // hide from @everyone
+        { id: me.id, type: 1, allow: BOT_ALLOW }, // keep the (non-admin) bot's access
+      ],
+    });
+    log(`setup: priv=${priv.id} (mirroring @everyone=${GUILD})`);
+
+    relay = new Relay({
+      discordToken: token, wsPort: PORT, avatarBaseUrl: '', guildIds: [GUILD],
+      identityPath: IDENT, permissionsPath: PERMS, invitesPath: INV,
+      attributionPath: '/tmp/rfc4-attr.json',
+      rolePool: { size: 50, prefix: 'portal-' }, webhookPoolSize: 1,
+      // Members intent is privileged + unneeded here; default off so we don't get
+      // a disallowed-intent disconnect on bots that haven't enabled it.
+      heartbeatIntervalMs: 30000, guildMembersIntent: process.env.RFC4_MEMBERS_INTENT === 'true', watchConfig: false,
+      historyCacheTtlMs: 0, maxInlineFileBytes: 8 * 1024 * 1024, allowPathFiles: false, replyLink: true,
+    });
     await relay.start();
     await sleep(4000); // let the gateway warm its channel/role cache
 
@@ -145,7 +145,7 @@ async function main() {
     // instant the gateway delivers channelCreate, before a post-hoc listener.
     const seen = [];
     const off = staff.on('event', (e) => { if (e.type === 'capabilities_update') seen.push(e); });
-    const fresh = await api('POST', `/guilds/${GUILD}/channels`, { name: `rfc4-new-${ts}`, type: 0 });
+    fresh = await api('POST', `/guilds/${GUILD}/channels`, { name: `rfc4-new-${ts}`, type: 0 });
     await sleep(2500);
     off();
     const ev = seen.find((e) => e.channelId === fresh.id);
@@ -154,11 +154,11 @@ async function main() {
     const s2 = await staff.call('list_channels', { guildId: GUILD });
     check('staff sees newly-created public channel after invalidation', (capsOf(s2.channels, fresh.id) ?? []).includes('VIEW_CHANNEL'),
       `caps=[${capsOf(s2.channels, fresh.id)}]`);
-    await api('DELETE', `/channels/${fresh.id}`).catch(() => {});
   } finally {
     guest?.close(); staff?.close();
-    await relay.stop().catch(() => {});
-    await api('DELETE', `/channels/${priv.id}`).catch(() => {});
+    await relay?.stop().catch(() => {});
+    if (fresh) await api('DELETE', `/channels/${fresh.id}`).catch(() => {});
+    if (priv) await api('DELETE', `/channels/${priv.id}`).catch(() => {});
     for (const f of [IDENT, PERMS, INV, '/tmp/rfc4-attr.json']) rmSync(f, { force: true });
   }
 

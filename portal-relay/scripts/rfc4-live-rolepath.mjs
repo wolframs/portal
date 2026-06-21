@@ -38,35 +38,35 @@ const capsOf = (chs, id) => chs.find((c) => c.id === id)?.capabilities ?? null;
 
 async function main() {
   const me = await api('GET', '/users/@me');
-  const role = await api('POST', `/guilds/${GUILD}/roles`, { name: `rfc4-real-${ts}`, mentionable: false });
-  // Private channel: hidden from @everyone, visible to the bot AND to our role.
-  const ch = await api('POST', `/guilds/${GUILD}/channels`, {
-    name: `rfc4-rolep-${ts}`, type: 0,
-    permission_overwrites: [
-      { id: GUILD, type: 0, deny: VIEW_CHANNEL },
-      { id: me.id, type: 1, allow: '68608' },
-      { id: role.id, type: 0, allow: VIEW_CHANNEL },
-    ],
-  });
-  log(`setup: role=${role.id} ch=${ch.id}`);
-
-  writeFileSync(IDENT, JSON.stringify({ personas: [] }));
-  writeFileSync(PERMS, JSON.stringify({
-    roles: { rfc4real: { caps: ['VIEW_CHANNEL', 'READ_HISTORY', 'SEND_MESSAGES'], scope: { mirrorRole: role.id }, guildId: GUILD } },
-    personas: {},
-  }));
-  writeFileSync(INV, JSON.stringify({ invites: [{ code: `rolep-${ts}`, label: 'rolep', roles: ['rfc4real'], maxUses: 9 }] }));
-
-  const relay = new Relay({
-    discordToken: token, wsPort: PORT, avatarBaseUrl: '', guildIds: [GUILD],
-    identityPath: IDENT, permissionsPath: PERMS, invitesPath: INV, attributionPath: '/tmp/rfc4rp-attr.json',
-    rolePool: { size: 50, prefix: 'portal-' }, webhookPoolSize: 1,
-    heartbeatIntervalMs: 30000, guildMembersIntent: process.env.RFC4_MEMBERS_INTENT === 'true', watchConfig: false,
-    historyCacheTtlMs: 0, maxInlineFileBytes: 8 * 1024 * 1024, allowPathFiles: false, replyLink: true,
-  });
-
-  let cli;
+  // Hoisted so finally cleans up even if setup throws.
+  let relay = null, role = null, ch = null, cli;
   try {
+    role = await api('POST', `/guilds/${GUILD}/roles`, { name: `rfc4-real-${ts}`, mentionable: false });
+    // Private channel: hidden from @everyone, visible to the bot AND to our role.
+    ch = await api('POST', `/guilds/${GUILD}/channels`, {
+      name: `rfc4-rolep-${ts}`, type: 0,
+      permission_overwrites: [
+        { id: GUILD, type: 0, deny: VIEW_CHANNEL },
+        { id: me.id, type: 1, allow: '68608' },
+        { id: role.id, type: 0, allow: VIEW_CHANNEL },
+      ],
+    });
+    log(`setup: role=${role.id} ch=${ch.id}`);
+
+    writeFileSync(IDENT, JSON.stringify({ personas: [] }));
+    writeFileSync(PERMS, JSON.stringify({
+      roles: { rfc4real: { caps: ['VIEW_CHANNEL', 'READ_HISTORY', 'SEND_MESSAGES'], scope: { mirrorRole: role.id }, guildId: GUILD } },
+      personas: {},
+    }));
+    writeFileSync(INV, JSON.stringify({ invites: [{ code: `rolep-${ts}`, label: 'rolep', roles: ['rfc4real'], maxUses: 9 }] }));
+
+    relay = new Relay({
+      discordToken: token, wsPort: PORT, avatarBaseUrl: '', guildIds: [GUILD],
+      identityPath: IDENT, permissionsPath: PERMS, invitesPath: INV, attributionPath: '/tmp/rfc4rp-attr.json',
+      rolePool: { size: 50, prefix: 'portal-' }, webhookPoolSize: 1,
+      heartbeatIntervalMs: 30000, guildMembersIntent: process.env.RFC4_MEMBERS_INTENT === 'true', watchConfig: false,
+      historyCacheTtlMs: 0, maxInlineFileBytes: 8 * 1024 * 1024, allowPathFiles: false, replyLink: true,
+    });
     await relay.start();
     await sleep(4000);
     const cr = await enroll({ url: URL_WS, invite: `rolep-${ts}`, desiredName: 'rfc4-rolep' });
@@ -105,9 +105,9 @@ async function main() {
       `caps=[${capsOf(d.channels, ch.id)}]`);
   } finally {
     cli?.close();
-    await relay.stop().catch(() => {});
-    await api('DELETE', `/channels/${ch.id}`).catch(() => {});
-    await api('DELETE', `/guilds/${GUILD}/roles/${role.id}`).catch(() => {}); // no-op if already deleted
+    await relay?.stop().catch(() => {});
+    if (ch) await api('DELETE', `/channels/${ch.id}`).catch(() => {});
+    if (role) await api('DELETE', `/guilds/${GUILD}/roles/${role.id}`).catch(() => {}); // no-op if already deleted
     for (const f of [IDENT, PERMS, INV, '/tmp/rfc4rp-attr.json']) rmSync(f, { force: true });
   }
   log(`\n=== ${pass} passed, ${fail} failed ===`);
