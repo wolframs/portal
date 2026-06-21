@@ -41,13 +41,15 @@ export interface PersonaPolicy {
 /**
  * A grant's *scope* — which channels it applies in (RFC-004). Caps answer the
  * "what may be done"; scope answers "where".
- *   { channels } — explicit allow-list
- *   { mirrorRole } — a Discord role id; scope = the channels that role can view
- *   { all }       — every channel (admin-ish; use sparingly)
+ *   { channels }    — explicit allow-list
+ *   { mirrorRole }  — a Discord role id; scope = the channels that role can view
+ *   { mirrorRoles } — several role ids; scope = the union of channels they can view
+ *   { all }         — every channel (admin-ish; use sparingly)
  */
 export type Scope =
   | { channels: string[] }
-  | { mirrorRole: string }
+  | { mirrorRole: string }       // a Discord role id; scope = the channels it can view
+  | { mirrorRoles: string[] }    // several role ids; scope = union of channels they can view
   | { all: true };
 
 /**

@@ -95,6 +95,31 @@ test('mirrorRole scope: fail-closed without lookup, then gated by visibility', (
   rmSync(path, { force: true });
 });
 
+test('mirrorRoles scope: union of several roles; fail-closed without lookup', () => {
+  const path = tmpFile({
+    roles: { team: { caps: [...RW], scope: { mirrorRoles: ['r-a', 'r-b'] }, guildId: 'g1' } },
+    personas: { t: { roles: ['team'] } },
+  });
+  const store = new PermissionsStore(path);
+
+  // No lookup → deny (fail-closed).
+  assert.deepEqual(sorted(store.resolve('t', 'g1', 'c1')), []);
+
+  // r-a sees c1,c2; r-b sees c2,c3 → union = c1,c2,c3 (not c4).
+  const vis = new Map([
+    ['g1:r-a', new Set(['c1', 'c2'])],
+    ['g1:r-b', new Set(['c2', 'c3'])],
+  ]);
+  store.setMirrorVisibility((g, r) => vis.get(`${g}:${r}`) ?? new Set());
+
+  assert.deepEqual(sorted(store.resolve('t', 'g1', 'c1')), [...RW].sort()); // via r-a
+  assert.deepEqual(sorted(store.resolve('t', 'g1', 'c3')), [...RW].sort()); // via r-b
+  assert.deepEqual(sorted(store.resolve('t', 'g1', 'c2')), [...RW].sort()); // both
+  assert.deepEqual(sorted(store.resolve('t', 'g1', 'c4')), []); // neither
+  assert.deepEqual(sorted(store.resolve('t', 'g2', 'c1')), []); // per-guild → cross-guild deny
+  rmSync(path, { force: true });
+});
+
 test('setPersonaPolicy / setPersonaRoles persist and round-trip', () => {
   const path = tmpFile({ roles: { r: { caps: ['VIEW_CHANNEL'], scope: { all: true } } }, personas: {} });
   const store = new PermissionsStore(path);

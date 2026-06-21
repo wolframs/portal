@@ -98,6 +98,7 @@ assign it many times.
 type Scope =
   | { channels: string[] }         // explicit channel allow-list
   | { mirrorRole: string }         // a Discord role id; scope = channels it can view
+  | { mirrorRoles: string[] }      // several role ids; scope = union of channels they can view
   | { all: true };                 // every channel (admin-ish; use sparingly)
 ```
 
@@ -213,6 +214,15 @@ Push invalidation then makes the **periodic re-sync a backstop**, not the primar
 freshness mechanism — covering the missed-event/reconnect window rather than being
 relied on for correctness. On `ready`/reconnect, flush the whole mirror cache so
 the first resolve after a gap always recomputes.
+
+**Multi-role mirroring (`mirrorRoles`).** Where a guild's `@everyone` isn't a
+useful baseline (e.g. a lobby/holding area) and access is gated by several
+Discord roles, a scope may mirror a **set**: `scope: { mirrorRoles: [a, b, c] }`
+resolves to the **union** of those roles' visible channels (per-guild, fail-closed
+like the single form). A persona's effective access is then driven by the set of
+access roles it's assigned — different sets → different levels. (Composing several
+single-`mirrorRole` access roles achieves the same union but lets each carry its
+own caps; `mirrorRoles` is the compact, shared-caps form.)
 
 > v1 mirrors **visibility** (which channels) and applies the role's declared caps
 > within them. A later refinement could mirror finer-grained per-channel perms
