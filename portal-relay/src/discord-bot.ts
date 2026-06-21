@@ -24,6 +24,7 @@ import {
   type PartialMessageReaction,
   type GuildBasedChannel,
   type AnyThreadChannel,
+  type Role,
 } from 'discord.js';
 import { existsSync, statSync } from 'node:fs';
 import { basename } from 'node:path';
@@ -109,6 +110,9 @@ type Handlers = {
   guildCreate?: (guildId: string, name: string, channels: ChannelMeta[]) => void;
   channelChange?: (channel: ChannelMeta) => void;
   channelDelete?: (channelId: string, guildId: string | null) => void;
+  /** A role's guild-level perms changed, or a role was created/deleted (RFC-004
+   *  mirror invalidation). `roleId === @everyone` ⇒ guild-wide baseline shift. */
+  roleChange?: (guildId: string, roleId: string) => void;
 };
 
 const MAX_ATTACH = 10;
@@ -336,6 +340,25 @@ export class DiscordBot implements WebhookOps, RoleOps {
       name: r.name,
       pooled: r.name.startsWith(poolPrefix),
     }));
+  }
+
+  /** Channel ids the given Discord role can VIEW (RFC-004 mirrorRole scope).
+   *  Reads the warm gateway cache, so it's cheap on a resolve miss. Unknown
+   *  guild/role → empty set (deny). */
+  channelsVisibleToRole(guildId: string, roleId: string): Set<string> {
+    const out = new Set<string>();
+    const guild = this.client.guilds.cache.get(guildId);
+    const role = guild?.roles.cache.get(roleId);
+    if (!guild || !role) return out;
+    for (const ch of guild.channels.cache.values()) {
+      if (ch.permissionsFor(role).has(PermissionsBitField.Flags.ViewChannel)) out.add(ch.id);
+    }
+    return out;
+  }
+
+  /** The @everyone role id for a guild (its baseline visibility role). */
+  everyoneRoleId(guildId: string): string | undefined {
+    return this.client.guilds.cache.get(guildId)?.roles.everyone.id;
   }
 
   /** Resolve bare handles to user ids (unique case-insensitive match, else null). */
@@ -586,6 +609,19 @@ export class DiscordBot implements WebhookOps, RoleOps {
     });
     this.client.on('threadDelete', (t) => {
       this.handlers.channelDelete?.(t.id, t.guildId ?? null);
+    });
+
+    // Role events ride the base Guilds intent (already requested) — no new intent.
+    // They feed mirrorRole scope invalidation (RFC-004 §5.5).
+    const onRole = (r: Role) => {
+      if (this.guildAllowed(r.guild.id)) this.handlers.roleChange?.(r.guild.id, r.id);
+    };
+    this.client.on('roleCreate', onRole);
+    this.client.on('roleDelete', onRole);
+    this.client.on('roleUpdate', (oldR, newR) => {
+      // Position-only reorders don't affect channel visibility — skip them.
+      if (oldR.permissions.bitfield === newR.permissions.bitfield) return;
+      onRole(newR);
     });
 
     this.client.on('error', (e) => console.error('[portal-relay] client error:', e.message));
