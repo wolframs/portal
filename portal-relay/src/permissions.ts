@@ -149,6 +149,53 @@ export class PermissionsStore {
     return this.roles.get(name);
   }
 
+  /**
+   * Cheap policy-level upper bound: could this persona have *any* capability in
+   * `guildId`? Used to avoid minting addressing roles in guilds a persona can't
+   * touch. Conservative — returns the policy grant (a superset of effective caps,
+   * before ∩ Discord), so it never reports "no access" where access exists.
+   *
+   * `channelInGuild(channelId)` tells whether an explicit `channels`-scope id
+   * belongs to this guild (channel ids are global, so the store can't know).
+   */
+  couldAccessGuild(
+    personaId: string,
+    guildId: string,
+    channelInGuild: (channelId: string) => boolean,
+  ): boolean {
+    const entry = this.personas.get(personaId);
+    if (!entry) return this.fileDefault.length > 0; // file default applies everywhere
+    for (const name of entry.roles ?? []) {
+      const role = this.roles.get(name);
+      if (!role || role.caps.length === 0) continue;
+      const s = role.scope;
+      if ('all' in s) {
+        if (s.all) return true;
+        continue;
+      }
+      if ('channels' in s) {
+        if (s.channels.some(channelInGuild)) return true;
+        continue;
+      }
+      // mirror{Role,Roles}: per-guild; grants here iff a mirrored role can see ≥1 channel.
+      if (role.guildId && role.guildId !== guildId) continue;
+      const mv = this.mirrorVisibility;
+      if (!mv) continue; // fail-closed
+      const rids = 'mirrorRoles' in s ? s.mirrorRoles : [s.mirrorRole];
+      if (rids.some((rid) => mv(guildId, rid).size > 0)) return true;
+    }
+    const pol = entry.policy;
+    if (pol) {
+      if (pol.default.length > 0) return true; // legacy global default applies everywhere
+      const g = pol.guilds?.[guildId];
+      if (g) {
+        if (g.default && g.default.length > 0) return true;
+        if (g.channels && Object.values(g.channels).some((caps) => caps.length > 0)) return true;
+      }
+    }
+    return false;
+  }
+
   // ── Mutations (persist + emit) ──
 
   setPersonaDefault(personaId: string, caps: Capability[]): void {

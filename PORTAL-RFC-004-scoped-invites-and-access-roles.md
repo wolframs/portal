@@ -258,6 +258,11 @@ P1 is independently shippable and is the security fix.
   the cache is stale.
 - **Invites remain bearer credentials** (RFC notes from the gateway review still
   apply: rate-limiting + unidentified-session caps are a separate hardening item).
+- **Addressing roles follow access.** The `portal-*` addressing-role pool only
+  mints a Discord role for a persona in guilds where it has rights
+  (`couldAccessGuild` — a policy-level superset check). A persona scoped to one
+  guild no longer leaves stray addressing roles in every other bridged guild,
+  and can't be @-addressed into a guild it can't act in.
 
 ## 8. Testing
 

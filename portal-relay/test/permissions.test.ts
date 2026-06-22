@@ -120,6 +120,48 @@ test('mirrorRoles scope: union of several roles; fail-closed without lookup', ()
   rmSync(path, { force: true });
 });
 
+test('couldAccessGuild: gates addressing-role minting per guild', () => {
+  // channelInGuild is guild-specific in the relay (closure over the queried
+  // guild); model that with a channel→guild owner map.
+  const OWNER = { 'c-in-gB': 'gB', cA: 'gA' };
+  const inGuild = (guild) => (cid) => OWNER[cid] === guild;
+  const path = tmpFile({
+    roles: {
+      gA: { caps: [...RW], scope: { mirrorRoles: ['rA'] }, guildId: 'gA' },
+      chans: { caps: [...RW], scope: { channels: ['c-in-gB'] } }, // global channels scope
+      everywhere: { caps: ['VIEW_CHANNEL'], scope: { all: true } },
+      empty: { caps: [], scope: { all: true } }, // no caps → grants nothing
+    },
+    personas: {
+      mirror: { roles: ['gA'] },
+      chan: { roles: ['chans'] },
+      admin: { roles: ['everywhere'] },
+      none: { roles: ['empty'] },
+      legacy: { policy: { default: [], guilds: { gB: { default: [...RW] } } } },
+    },
+  });
+  const store = new PermissionsStore(path);
+  // mirror role rA can see a channel only in gA
+  store.setMirrorVisibility((g, r) => (g === 'gA' && r === 'rA' ? new Set(['cA']) : new Set()));
+
+  // mirror persona: access in gA, not gB
+  assert.equal(store.couldAccessGuild('mirror', 'gA', inGuild('gA')), true);
+  assert.equal(store.couldAccessGuild('mirror', 'gB', inGuild('gB')), false);
+  // channels-scope persona: access only in the guild that owns the channel
+  assert.equal(store.couldAccessGuild('chan', 'gB', inGuild('gB')), true);
+  assert.equal(store.couldAccessGuild('chan', 'gA', inGuild('gA')), false);
+  // all-scope: access everywhere
+  assert.equal(store.couldAccessGuild('admin', 'anyGuild', inGuild('anyGuild')), true);
+  // empty-caps role: no access anywhere
+  assert.equal(store.couldAccessGuild('none', 'gA', inGuild('gA')), false);
+  // legacy per-guild policy
+  assert.equal(store.couldAccessGuild('legacy', 'gB', inGuild('gB')), true);
+  assert.equal(store.couldAccessGuild('legacy', 'gA', inGuild('gA')), false);
+  // unknown persona, file default deny
+  assert.equal(store.couldAccessGuild('ghost', 'gA', inGuild('gA')), false);
+  rmSync(path, { force: true });
+});
+
 test('setPersonaPolicy / setPersonaRoles persist and round-trip', () => {
   const path = tmpFile({ roles: { r: { caps: ['VIEW_CHANNEL'], scope: { all: true } } }, personas: {} });
   const store = new PermissionsStore(path);
