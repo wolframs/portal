@@ -277,9 +277,12 @@ export class Relay implements GatewayHooks {
         channels.push(this.toPortalChannel(meta, session.personaId));
       }
     }
-    // Pre-bind a role in each guild so the persona is addressable immediately.
+    // Pre-bind a role in each guild the persona can actually act in, so it's
+    // addressable immediately. Skip guilds where it has no rights — no point
+    // minting (and leaking) a Discord addressing role there.
     const roleByGuild: Record<string, string> = {};
     for (const g of guilds) {
+      if (!this.personaCanAccessGuild(cfg.id, g.id)) continue;
       try {
         roleByGuild[g.id] = await this.roles.bind(g.id, cfg.id, cfg.displayName);
       } catch (err) {
@@ -337,11 +340,17 @@ export class Relay implements GatewayHooks {
         const p = params as RpcParams<'delete_message'>;
         const ref = await this.resolveRef(p.messageId);
         if (!ref) throw rpcError('NOT_FOUND', 'unknown message');
-        if (ref.personaId !== personaId) throw rpcError('FORBIDDEN', 'not your message');
-        if (!ref.webhookId) throw rpcError('NOT_FOUND', 'no webhook recorded for message');
-        this.requireCap(personaId, ref.channelId, 'DELETE_OWN');
-        await this.webhooks.ensureLoaded(ref.channelId);
-        await this.webhooks.delete(ref.webhookId, ref.discordMsgId, ref.threadId);
+        if (ref.personaId === personaId && ref.webhookId) {
+          // Own webhook message → delete via the webhook.
+          this.requireCap(personaId, ref.channelId, 'DELETE_OWN');
+          await this.webhooks.ensureLoaded(ref.channelId);
+          await this.webhooks.delete(ref.webhookId, ref.discordMsgId, ref.threadId);
+        } else {
+          // Someone else's message → moderation delete (bot-level), gated by the
+          // MANAGE_MESSAGES capability (and the bot's Discord Manage Messages perm).
+          this.requireCap(personaId, ref.channelId, 'MANAGE_MESSAGES');
+          await this.bot.deleteAnyMessage(ref.threadId ?? ref.channelId, ref.discordMsgId);
+        }
         return {};
       }
       case 'react': {
@@ -467,6 +476,8 @@ export class Relay implements GatewayHooks {
       for (const pid of p.mentionPersonaIds) {
         const target2 = this.identity.get(pid);
         if (!target2) continue;
+        // Don't mint an addressing role for a persona with no rights in this guild.
+        if (!this.personaCanAccessGuild(pid, guildId)) continue;
         const roleId = await this.roles.bind(guildId, pid, target2.displayName);
         tags.push(`<@&${roleId}>`);
       }
@@ -740,6 +751,16 @@ export class Relay implements GatewayHooks {
       archived: meta.archived,
       capabilities: this.capsFor(personaId, meta.id, meta.guildId),
     };
+  }
+
+  /** Whether a persona has any rights in a guild — gates addressing-role minting
+   *  so we don't create Discord roles in guilds the persona can't touch. */
+  private personaCanAccessGuild(personaId: string, guildId: string): boolean {
+    return this.permissions.couldAccessGuild(
+      personaId,
+      guildId,
+      (channelId) => this.bot.channelForPerms(channelId)?.guildId === guildId,
+    );
   }
 
   private capsFor(personaId: string, channelId: string, guildId: string | null): Capability[] {
