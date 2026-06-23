@@ -1,6 +1,6 @@
 {
   "name": "@animalabs/portal-client",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "main": "./dist/src/index.js",
   "types": "./dist/src/index.d.ts",
@@ -12,7 +12,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@animalabs/portal-protocol": "^0.1.0",
+    "@animalabs/portal-protocol": "^0.2.0",
     "ws": "^8.18.0"
   },
   "devDependencies": {
