@@ -52,6 +52,17 @@ export class PortalAgent {
   }
 
   private ingest(message: PortalMessage, addressedToMe: boolean, reasons: AddressReason[]): void {
+    // Auto-subscribe to a channel the moment we're addressed there. A mention is
+    // delivered regardless of subscription, but the relay drops *ambient*
+    // (non-mention) messages for unsubscribed personas — so without this, the
+    // agent never sees the chatter between mentions. Subscribing now means
+    // subsequent ambient messages are delivered and accumulate for the next wake.
+    if (addressedToMe && this.state.subscribe(message.channelId)) {
+      if (process.env.PORTAL_DEBUG) {
+        console.error(`[portal-cc] auto-subscribed to ${message.channelId} (addressed here)`);
+      }
+      this.client.subscribe(message.channelId).catch(() => {});
+    }
     const wasPing = this.state.ingest(message, addressedToMe, reasons);
     if (wasPing && this.onPing) {
       this.onPing({ message, reasons, at: message.createdAt });

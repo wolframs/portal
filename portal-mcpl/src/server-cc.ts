@@ -127,6 +127,13 @@ export class PortalCcChannelServer {
 
   private wireClient(): void {
     this.client.on('message', (e) => {
+      if (process.env.PORTAL_DEBUG) {
+        console.error(
+          `[portal-cc] recv ch=${e.message.channelId} addressed=${e.addressedToMe} ` +
+            `reasons=[${e.reasons.join(',')}] subs=[${this.agent.state.subscriptionList().join(',')}] ` +
+            `→ ${e.addressedToMe ? 'WAKE' : 'accrue-ambient'}`,
+        );
+      }
       void this.pushMessage(e.message, e.addressedToMe, e.reasons).catch((err) =>
         console.error('[portal-cc] push failed:', (err as Error).message),
       );
@@ -186,6 +193,11 @@ export class PortalCcChannelServer {
     if (message.guildId) meta.guildId = message.guildId;
     if (reasons.length) meta.reasons = reasons.join(',');
 
+    if (process.env.PORTAL_DEBUG) {
+      console.error(
+        `[portal-cc] WAKE ch=${channelId} contextMsgs=${all.length} omitted=${omitted} (folded backlog + trigger)`,
+      );
+    }
     conn.sendNotification(CHANNEL_NOTIFY, { content: this.buildContent(all, message, omitted), meta });
   }
 
