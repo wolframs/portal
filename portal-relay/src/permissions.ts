@@ -149,6 +149,17 @@ export class PermissionsStore {
     return this.roles.get(name);
   }
 
+  /** The full access-role catalog (read-only snapshot) — admin panel pickers. */
+  allRoles(): Record<string, AccessRole> {
+    return Object.fromEntries([...this.roles].map(([k, v]) => [k, structuredClone(v)]));
+  }
+
+  /** A persona's raw entry (roles + inline policy), cloned. Admin panel reads. */
+  getEntry(personaId: string): PersonaEntry | undefined {
+    const e = this.personas.get(personaId);
+    return e ? structuredClone(e) : undefined;
+  }
+
   /**
    * Cheap policy-level upper bound: could this persona have *any* capability in
    * `guildId`? Used to avoid minting addressing roles in guilds a persona can't
@@ -218,6 +229,25 @@ export class PermissionsStore {
     this.emit({ personaId, scope: 'reload' });
   }
 
+  /** Union additional roles into a persona's set (RFC-005 claim_invite / admin
+   *  augment). Returns the resulting role list. */
+  addPersonaRoles(personaId: string, roles: string[]): string[] {
+    const e = this.ensure(personaId);
+    e.roles = [...new Set([...(e.roles ?? []), ...roles])];
+    this.persist();
+    this.emit({ personaId, scope: 'reload' });
+    return e.roles;
+  }
+
+  /** Remove a single role from a persona (RFC-005 revoke). Returns the result. */
+  removePersonaRole(personaId: string, role: string): string[] {
+    const e = this.ensure(personaId);
+    e.roles = (e.roles ?? []).filter((r) => r !== role);
+    this.persist();
+    this.emit({ personaId, scope: 'reload' });
+    return e.roles;
+  }
+
   setGuildDefault(personaId: string, guildId: string, caps: Capability[]): void {
     const g = this.ensureGuild(personaId, guildId);
     g.default = caps;
@@ -239,6 +269,28 @@ export class PermissionsStore {
       this.persist();
       this.emit({ personaId, scope: 'channel', guildId, channelId });
     }
+  }
+
+  /** Create/replace a named access role in the catalog (super-admin authoring,
+   *  RFC-005 §5.3). A reload-scope emit re-pushes caps to any persona that
+   *  references the role. */
+  setRole(name: string, role: AccessRole): void {
+    this.roles.set(name, role);
+    this.persist();
+    for (const [pid, e] of this.personas) {
+      if (e.roles?.includes(name)) this.emit({ personaId: pid, scope: 'reload' });
+    }
+  }
+
+  /** Remove a named access role from the catalog. Personas referencing it lose
+   *  those caps on their next action (live revocation, §5.8). */
+  removeRole(name: string): boolean {
+    if (!this.roles.delete(name)) return false;
+    this.persist();
+    for (const [pid, e] of this.personas) {
+      if (e.roles?.includes(name)) this.emit({ personaId: pid, scope: 'reload' });
+    }
+    return true;
   }
 
   removePersona(personaId: string): void {

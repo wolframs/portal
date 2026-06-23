@@ -132,10 +132,17 @@ if (roles.length) {
   process.exit(1);
 }
 
+const mode = arg('mode'); // 'mint' | 'augment' | 'both' (RFC-005 §5.6; default mint)
+if (mode && !['mint', 'augment', 'both'].includes(mode)) {
+  console.error(`error: --mode must be one of mint|augment|both (got ${mode})`);
+  process.exit(1);
+}
+
 const invite = {
   code,
   label: arg('label', 'invite'),
   ...grantFields,
+  ...(mode ? { mode } : {}),
   ...(subscriptions.length ? { subscriptions } : {}),
   ...(maxUses !== undefined ? { maxUses } : {}),
   uses: 0,

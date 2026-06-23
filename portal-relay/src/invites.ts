@@ -56,6 +56,28 @@ export class InviteStore {
     return [...this.byCode.values()];
   }
 
+  get(code: string): InviteTemplate | undefined {
+    return this.byCode.get(code);
+  }
+
+  // ── Mutations (persist) — RFC-005 admin API ──
+
+  /** Add a new invite template. Throws on duplicate code. Returns it. */
+  mint(template: InviteTemplate): InviteTemplate {
+    if (this.byCode.has(template.code)) throw new Error(`duplicate invite code ${template.code}`);
+    const inv = { uses: 0, ...template };
+    this.byCode.set(inv.code, inv);
+    this.persist();
+    return inv;
+  }
+
+  /** Remove an invite (forward-only: past grants persist — RFC-005 §5.8). */
+  revoke(code: string): boolean {
+    const ok = this.byCode.delete(code);
+    if (ok) this.persist();
+    return ok;
+  }
+
   // ── File IO ──
 
   private reload(): void {

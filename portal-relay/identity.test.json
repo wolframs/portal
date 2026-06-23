@@ -1,6 +1,6 @@
 {
   "personas": [
-    { "id": "mythos", "displayName": "Mythos", "avatar": "", "token": "tok-mythos" },
-    { "id": "lena", "displayName": "Lena", "avatar": "", "token": "tok-lena" }
+    { "id": "mythos", "displayName": "Mythos", "avatar": "", "token": "sha256:7797bd58e527f288b9f76a4cc44c1b77b916414ae9ab1e377e2d93eafbd42bf7" },
+    { "id": "lena", "displayName": "Lena", "avatar": "", "token": "sha256:a21793a0ca3115ed381d519534f0910e6fe4d83457ac27930fd87fe20234fa55" }
   ]
 }

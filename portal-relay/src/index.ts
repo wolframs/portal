@@ -15,6 +15,18 @@
  *   PORTAL_WEBHOOK_POOL     Webhooks per hot channel (default 1).
  *   PORTAL_HEARTBEAT_MS     Heartbeat interval (default 30000).
  *   DISCORD_GUILD_ID        Optional comma-separated guild allow-list.
+ *
+ *   Admin panel / HTTP API (RFC-005) — all gated on PORTAL_ADMIN_ENABLED=true:
+ *   PORTAL_ADMIN_ENABLED         Set "true" to enable the admin HTTP API.
+ *   PORTAL_ADMIN_PORT            Admin API port, bound to 127.0.0.1 (default 8791).
+ *   PORTAL_OAUTH_CLIENT_ID       Discord OAuth2 app client id (required).
+ *   PORTAL_OAUTH_CLIENT_SECRET   Discord OAuth2 app client secret (required).
+ *   PORTAL_OAUTH_REDIRECT_URI    Exact OAuth redirect URI (required).
+ *   PORTAL_ADMIN_POST_LOGIN_URL  Where to send the browser post-login (default "/").
+ *   PORTAL_SUPERADMINS           Comma-separated Discord user ids (operator super-admins).
+ *   PORTAL_ADMIN_SESSION_TTL_MS  Session TTL in ms (default 1800000 = 30 min).
+ *   PORTAL_ADMIN_AUDIT           Append-only audit log path, JSONL (required).
+ *   PORTAL_ADMIN_COOKIE_INSECURE Set "true" to drop the cookie Secure flag (local dev only).
  */
 import { loadConfig } from './config.js';
 import { Relay } from './relay.js';

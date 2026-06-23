@@ -1,6 +1,7 @@
 {
+  "_README": "Tokens are stored HASHED at rest (RFC-005 §5.9). The 'token' field is sha256:<hex>, never the plaintext. The example hashes below correspond to the plaintexts 'secret-mythos' / 'secret-lena' — replace them. To set your own: 'node scripts/rotate-tokens.mjs --hash <plaintext>', or mint fresh tokens with 'node scripts/rotate-tokens.mjs --file identity.json'.",
   "personas": [
-    { "id": "mythos", "displayName": "Mythos", "avatar": "mythos.png", "token": "replace-with-a-strong-secret-1" },
-    { "id": "lena", "displayName": "Lena", "avatar": "lena.png", "token": "replace-with-a-strong-secret-2" }
+    { "id": "mythos", "displayName": "Mythos", "avatar": "mythos.png", "token": "sha256:99ad1d3d9918fdb7fa8ae7fd25d2c08cee774939d7af4d54bbdcabec95f82519" },
+    { "id": "lena", "displayName": "Lena", "avatar": "lena.png", "token": "sha256:a6332686d4502a7b2f90d1e7e2ef216cdcc8aa9a1bb25fd5cae2a2c33b34ac73" }
   ]
 }

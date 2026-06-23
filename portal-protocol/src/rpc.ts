@@ -163,6 +163,25 @@ export interface ListPinsResult {
   messages: PortalMessage[];
 }
 
+// ── Self-service rights (RFC-005) ──
+
+export interface ClaimInviteParams {
+  /** An invite code whose `mode` permits augmenting an existing persona. */
+  code: string;
+}
+export interface ClaimInviteResult {
+  /** The persona's resulting access-role set after the union. */
+  roles: string[];
+}
+
+/** Rotate the calling persona's own token. The new token is returned in-band
+ *  over the live session; the old token is invalidated immediately. */
+export type RotateTokenParams = Record<string, never>;
+export interface RotateTokenResult {
+  /** The new plaintext token. Persist it — the old one no longer works. */
+  token: string;
+}
+
 type Empty = Record<string, never>;
 
 /**
@@ -190,6 +209,8 @@ export interface RpcMethods {
   resolve_mentions: { params: ResolveMentionsParams; result: ResolveMentionsResult };
   list_roles: { params: ListRolesParams; result: ListRolesResult };
   list_pins: { params: ListPinsParams; result: ListPinsResult };
+  claim_invite: { params: ClaimInviteParams; result: ClaimInviteResult };
+  rotate_token: { params: RotateTokenParams; result: RotateTokenResult };
 }
 
 export type RpcMethod = keyof RpcMethods;

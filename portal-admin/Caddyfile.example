@@ -1,0 +1,38 @@
+# Portal Admin — Caddy vhost (RFC-005 §5.7)
+#
+# Caddy is the sole internet-facing endpoint. It:
+#   1. terminates TLS,
+#   2. serves this SPA's static assets from disk at `/`,
+#   3. reverse-proxies the admin API (`/admin/*`) to the relay on 127.0.0.1:8791.
+#
+# The relay's admin API binds localhost only — it is never exposed directly.
+# Clean CSP: every asset and API call is same-origin, no external hosts.
+#
+# Replace portal-admin.example.com and the root path, then:
+#   caddy run --config Caddyfile
+
+portal-admin.example.com {
+	encode gzip
+
+	# Admin API → relay (localhost). Keep this BEFORE the static file handler so
+	# /admin/* is always proxied and never shadowed by a file on disk.
+	handle /admin/* {
+		reverse_proxy 127.0.0.1:8791
+	}
+
+	# Static SPA assets. Point `root` at this directory (where index.html lives).
+	handle {
+		root * /srv/portal-admin
+		try_files {path} /index.html
+		file_server
+	}
+
+	# Defense-in-depth headers. The OAuth redirect to discord.com is a top-level
+	# browser navigation (not fetch), so it is unaffected by connect-src.
+	header {
+		Content-Security-Policy "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; base-uri 'self'; frame-ancestors 'none'"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "same-origin"
+		-Server
+	}
+}

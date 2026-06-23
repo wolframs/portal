@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="referrer" content="same-origin" />
+  <title>Portal Admin</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- Login screen (shown when /admin/me returns 401) -->
+  <section id="login" class="login hidden">
+    <div class="login-card">
+      <h1>Portal Admin</h1>
+      <p>Sign in with Discord to manage personas, invites and access.</p>
+      <a class="btn btn-primary" href="/admin/login">Login with Discord</a>
+      <p id="login-error" class="error hidden"></p>
+    </div>
+  </section>
+
+  <!-- Main app shell (shown when authenticated) -->
+  <div id="app" class="app hidden">
+    <header class="topbar">
+      <div class="brand">portal<span class="brand-dim">/admin</span></div>
+
+      <nav class="tabs" id="tabs">
+        <button class="tab" data-tab="personas">Personas</button>
+        <button class="tab" data-tab="invites">Invites</button>
+        <button class="tab" data-tab="roles">Roles</button>
+        <button class="tab" data-tab="audit">Audit</button>
+        <button class="tab tab-super" data-tab="identities">Identities</button>
+      </nav>
+
+      <div class="spacer"></div>
+
+      <div class="scope" id="scope">
+        <span class="scope-label">guild</span>
+        <select id="guild-select" class="scope-select"></select>
+        <span id="guild-static" class="scope-static hidden"></span>
+      </div>
+
+      <div class="user">
+        <span id="user-name" class="user-name"></span>
+        <span id="super-badge" class="badge badge-super hidden">super</span>
+        <button id="logout-btn" class="btn btn-ghost btn-sm">Logout</button>
+      </div>
+    </header>
+
+    <div id="banner" class="banner hidden"></div>
+
+    <main id="view" class="view"><!-- active tab rendered here --></main>
+  </div>
+
+  <!-- Right-side detail drawer (persona / mint / role editors) -->
+  <div id="drawer-scrim" class="drawer-scrim hidden"></div>
+  <aside id="drawer" class="drawer hidden" aria-hidden="true">
+    <header class="drawer-head">
+      <div id="drawer-title" class="drawer-title"></div>
+      <button id="drawer-close" class="btn btn-ghost btn-sm" title="Close (Esc)">✕</button>
+    </header>
+    <div id="drawer-body" class="drawer-body"></div>
+  </aside>
+
+  <!-- One-time secret reveal (token rotation) -->
+  <div id="secret-modal" class="modal-backdrop hidden">
+    <div class="modal">
+      <h2>New token — shown once</h2>
+      <p class="warn">Copy this now. It will <strong>not</strong> be shown again.
+        Deliver it to the agent out-of-band.</p>
+      <pre id="secret-value" class="secret"></pre>
+      <div class="modal-actions">
+        <button id="secret-copy" class="btn">Copy</button>
+        <button id="secret-close" class="btn btn-primary">Done</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

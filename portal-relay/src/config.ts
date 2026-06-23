@@ -126,6 +126,14 @@ export interface InviteTemplate {
   uses?: number;
   /** ISO timestamp after which the invite is rejected. Omit for no expiry. */
   expiresAt?: string;
+  /**
+   * What the invite may do (RFC-005 §5.6). Default `'mint'` (today's behaviour):
+   *   'mint'    — an unauthenticated agent enrolls a NEW persona (`register`).
+   *   'augment' — an AUTHENTICATED persona claims it to add its roles/grant to
+   *               itself (`claim_invite`).
+   *   'both'    — either path is allowed.
+   */
+  mode?: 'mint' | 'augment' | 'both';
 }
 
 export interface InvitesFile {
@@ -135,6 +143,34 @@ export interface InvitesFile {
 export interface RolePoolConfig {
   size: number;
   prefix: string;
+}
+
+/**
+ * Admin panel / HTTP API config (RFC-005). Present only when the admin surface is
+ * enabled (`PORTAL_ADMIN_ENABLED=true`). The API binds localhost; Caddy fronts it
+ * with TLS and serves the SPA. Discord OAuth derives which guilds an admin may
+ * manage from their live Discord permissions; `superadmins` is the operator
+ * override list (Discord user ids).
+ */
+export interface AdminConfig {
+  /** HTTP port, bound to 127.0.0.1 (default 8791). Caddy proxies to it. */
+  port: number;
+  /** Discord OAuth2 application client id. */
+  oauthClientId: string;
+  /** Discord OAuth2 application client secret. */
+  oauthClientSecret: string;
+  /** Exact OAuth redirect URI (must match the Discord app + our allowlist). */
+  redirectUri: string;
+  /** Where to send the browser after a successful login (the SPA root). */
+  postLoginUrl: string;
+  /** Operator super-admins: Discord user ids with global authority. */
+  superadmins: string[];
+  /** Server-side session TTL (ms). Short — admin rights are re-derived on login. */
+  sessionTtlMs: number;
+  /** Append-only audit log path (JSONL). */
+  auditPath: string;
+  /** Set the `Secure` flag on cookies (default true; false only for local dev). */
+  cookieSecure: boolean;
 }
 
 export interface RelayConfig {
@@ -168,6 +204,8 @@ export interface RelayConfig {
   /** Prepend a quoted jump-link when a persona replies (webhooks can't carry a
    *  native Discord reply). Default true; set false to suppress the header. */
   replyLink: boolean;
+  /** Admin panel / HTTP API (RFC-005). Undefined ⇒ disabled. */
+  admin?: AdminConfig;
 }
 
 export function loadConfig(): RelayConfig {
@@ -192,6 +230,24 @@ export function loadConfig(): RelayConfig {
     maxInlineFileBytes: parseInt(process.env.PORTAL_MAX_INLINE_BYTES ?? String(8 * 1024 * 1024), 10),
     allowPathFiles: process.env.PORTAL_ALLOW_PATH_FILES === 'true',
     replyLink: process.env.PORTAL_REPLY_LINK !== 'false',
+    admin: loadAdminConfig(),
+  };
+}
+
+/** Build the admin config from env, or undefined when the panel is disabled.
+ *  Enabling it (`PORTAL_ADMIN_ENABLED=true`) requires the OAuth credentials. */
+function loadAdminConfig(): AdminConfig | undefined {
+  if (process.env.PORTAL_ADMIN_ENABLED !== 'true') return undefined;
+  return {
+    port: parseInt(process.env.PORTAL_ADMIN_PORT ?? '8791', 10),
+    oauthClientId: requireEnv('PORTAL_OAUTH_CLIENT_ID'),
+    oauthClientSecret: requireEnv('PORTAL_OAUTH_CLIENT_SECRET'),
+    redirectUri: requireEnv('PORTAL_OAUTH_REDIRECT_URI'),
+    postLoginUrl: process.env.PORTAL_ADMIN_POST_LOGIN_URL ?? '/',
+    superadmins: splitCsv(process.env.PORTAL_SUPERADMINS),
+    sessionTtlMs: parseInt(process.env.PORTAL_ADMIN_SESSION_TTL_MS ?? String(30 * 60 * 1000), 10),
+    auditPath: requireEnv('PORTAL_ADMIN_AUDIT'),
+    cookieSecure: process.env.PORTAL_ADMIN_COOKIE_INSECURE !== 'true',
   };
 }
 

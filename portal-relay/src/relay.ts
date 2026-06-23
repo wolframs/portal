@@ -22,13 +22,15 @@ import type { InviteTemplate, PersonaIdentity, PersonaPolicy, RelayConfig, Scope
 import { DiscordBot, type ChannelMeta, type IncomingMessage } from './discord-bot.js';
 import { Gateway, type GatewayHooks, Session } from './gateway.js';
 import { HistoryCache } from './history-cache.js';
-import { IdentityStore, type IdentityChange } from './identity.js';
+import { IdentityStore, type IdentityChange, generateToken, hashToken } from './identity.js';
 import { InviteStore } from './invites.js';
 import { MessageStore, makeRelayId, parseRelayId, type MessageRef } from './message-store.js';
 import { MirrorCache } from './mirror-cache.js';
 import { PermissionsStore, type PermissionChange, computeCapabilities } from './permissions.js';
 import { RolePool } from './role-pool.js';
 import { WebhookPool } from './webhook-pool.js';
+import { AdminServer, type AdminDeps } from './admin/server.js';
+import { AuditLog } from './admin/audit.js';
 
 export class Relay implements GatewayHooks {
   private bot: DiscordBot;
@@ -41,6 +43,10 @@ export class Relay implements GatewayHooks {
   private history: HistoryCache;
   private gateway: Gateway;
   private mirror: MirrorCache;
+  private admin?: AdminServer;
+  /** Shared audit log (RFC-005). Present only when the admin panel is enabled;
+   *  self-service ops (claim_invite / rotate_token) audit here too. */
+  private audit?: AuditLog;
 
   constructor(private config: RelayConfig) {
     this.bot = new DiscordBot(config.discordToken, config.guildIds, {
@@ -60,6 +66,33 @@ export class Relay implements GatewayHooks {
     this.roles = new RolePool(this.bot, config.rolePool.size, config.rolePool.prefix);
     this.webhooks = new WebhookPool(this.bot, config.webhookPoolSize);
     this.gateway = new Gateway(this, config.heartbeatIntervalMs);
+    // RFC-005: admin HTTP API. The deps object closes over the bot/gateway so the
+    // admin module stays decoupled from discord.js and is unit-testable.
+    if (config.admin) {
+      this.audit = new AuditLog(config.admin.auditPath);
+      const deps: AdminDeps = {
+        config: config.admin,
+        identity: this.identity,
+        permissions: this.permissions,
+        invites: this.invites,
+        audit: this.audit,
+        listGuilds: () => this.bot.listGuilds(),
+        listRoles: (gid) => this.bot.listRoles(gid, config.rolePool.prefix),
+        listChannels: (gid) =>
+          this.bot.listChannelMetas(gid).map((c) => ({
+            id: c.id,
+            name: c.name ?? undefined,
+            type: c.type,
+          })),
+        channelInGuild: (gid, cid) => this.bot.channelForPerms(cid)?.guildId === gid,
+        closePersona: (personaId) => this.gateway.closePersona(personaId),
+        applyClaim: (personaId, code) => this.applyInviteAugment(personaId, code),
+        rotatePersonaToken: (personaId) => this.rotatePersonaToken(personaId),
+        revokePersonaToken: (personaId) => this.revokePersonaToken(personaId),
+        newInviteCode: () => `inv_${randomBytes(18).toString('base64url')}`,
+      };
+      this.admin = new AdminServer(deps);
+    }
   }
 
   async start(): Promise<void> {
@@ -100,6 +133,7 @@ export class Relay implements GatewayHooks {
     await this.bot.connect();
     console.error(`[portal-relay] discord connected as ${this.bot.botUserId}`);
     this.gateway.listen(this.config.wsPort);
+    await this.admin?.listen();
   }
 
   async stop(): Promise<void> {
@@ -107,6 +141,7 @@ export class Relay implements GatewayHooks {
     this.permissions.stopWatching();
     this.invites?.stopWatching();
     this.store.flush();
+    await this.admin?.close();
     await this.gateway.close();
     await this.bot.disconnect();
   }
@@ -188,15 +223,17 @@ export class Relay implements GatewayHooks {
     if (!this.invites) return { error: 'registration disabled' };
     const checked = this.invites.check(d.invite, Date.now());
     if (typeof checked === 'string') return { error: `invite ${checked}` };
+    // RFC-005 §5.6: an augment-only invite cannot mint a new persona.
+    if (checked.mode === 'augment') return { error: 'invite is augment-only' };
 
     const displayName = (d.desiredName || 'agent').slice(0, 80).trim() || 'agent';
     const personaId = this.mintPersonaId(checked.namePrefix ?? displayName);
-    const token = `pt_${randomBytes(24).toString('base64url')}`;
+    const token = generateToken(); // plaintext, returned to the agent
     const identity: PersonaIdentity = {
       id: personaId,
       displayName,
       avatar: d.avatar ?? '',
-      token,
+      token: hashToken(token), // stored hashed-at-rest (RFC-005 §5.9)
     };
     this.identity.upsert(identity);
     this.applyInviteGrant(personaId, checked);
@@ -256,6 +293,75 @@ export class Relay implements GatewayHooks {
     const channels: Record<string, Capability[]> = {};
     for (const id of channelIds) channels[id] = caps;
     return { default: [], guilds: { [guildId]: { default: [], channels } } };
+  }
+
+  /**
+   * Augment an EXISTING persona with an invite's grant (RFC-005 §5.6). Shared by
+   * the `claim_invite` op (actor = the persona) and admin-initiated claim (actor =
+   * an admin). Validates the invite + its `mode`, unions roles / merges inline
+   * grant, consumes a use, and returns the resulting role set. Throws rpcError on
+   * any rejection. Auditing is the caller's responsibility (actor differs).
+   */
+  private applyInviteAugment(personaId: string, code: string): { roles: string[] } {
+    if (!this.invites) throw rpcError('NOT_FOUND', 'invites not enabled');
+    if (!this.identity.get(personaId)) throw rpcError('NOT_FOUND', 'no such persona');
+    const checked = this.invites.check(code, Date.now());
+    if (typeof checked === 'string') throw rpcError('INVALID_PARAMS', `invite ${checked}`);
+    if (checked.mode !== 'augment' && checked.mode !== 'both') {
+      throw rpcError('FORBIDDEN', 'invite is not claimable (mint-only)');
+    }
+    if (checked.roles?.length) {
+      this.permissions.addPersonaRoles(personaId, checked.roles);
+    } else {
+      const grant = checked.grant ?? (checked.caps?.length ? { caps: checked.caps, scope: { all: true } as Scope } : undefined);
+      if (grant) {
+        const add = this.scopeToPolicy(checked.guildId, grant.scope, grant.caps);
+        const base = this.permissions.getPolicy(personaId) ?? { default: [] };
+        this.permissions.setPersonaPolicy(personaId, this.mergePolicy(base, add));
+      }
+    }
+    this.invites.consume(code);
+    return { roles: this.permissions.getRoleNames(personaId) };
+  }
+
+  /** Union two policies (most-permissive) for augment-merge. */
+  private mergePolicy(base: PersonaPolicy, add: PersonaPolicy): PersonaPolicy {
+    const out: PersonaPolicy = { default: [...new Set([...base.default, ...add.default])] };
+    const guilds: Record<string, { default?: Capability[]; channels?: Record<string, Capability[]> }> = {
+      ...(base.guilds ?? {}),
+    };
+    for (const [gid, gp] of Object.entries(add.guilds ?? {})) {
+      const cur = guilds[gid] ?? {};
+      const channels = { ...(cur.channels ?? {}) };
+      for (const [cid, caps] of Object.entries(gp.channels ?? {})) {
+        channels[cid] = [...new Set([...(channels[cid] ?? []), ...caps])];
+      }
+      guilds[gid] = {
+        default: [...new Set([...(cur.default ?? []), ...(gp.default ?? [])])],
+        ...(Object.keys(channels).length ? { channels } : {}),
+      };
+    }
+    if (Object.keys(guilds).length) out.guilds = guilds;
+    return out;
+  }
+
+  /** Mint a fresh token for a persona, store it hashed, return the plaintext.
+   *  Sessions stay up (self-rotation is zero-downtime, RFC-005 §5.9). */
+  private rotatePersonaToken(personaId: string): string {
+    const cur = this.identity.get(personaId);
+    if (!cur) throw rpcError('NOT_FOUND', 'no such persona');
+    const token = generateToken();
+    this.identity.upsert({ ...cur, token: hashToken(token) });
+    return token;
+  }
+
+  /** Invalidate a persona's token (rotate to an undisclosed secret) and drop its
+   *  live sessions — admin force-revoke for a compromised/rogue agent (§5.9). */
+  private revokePersonaToken(personaId: string): void {
+    const cur = this.identity.get(personaId);
+    if (!cur) throw rpcError('NOT_FOUND', 'no such persona');
+    this.identity.upsert({ ...cur, token: hashToken(generateToken()) });
+    this.gateway.closePersona(personaId);
   }
 
   /** Slug a display name + short random suffix into a unique persona id. */
@@ -449,6 +555,28 @@ export class Relay implements GatewayHooks {
         const p = params as RpcParams<'set_typing'>;
         await this.bot.sendTyping(p.threadId ?? p.channelId);
         return {};
+      }
+      case 'claim_invite': {
+        const p = params as RpcParams<'claim_invite'>;
+        const result = this.applyInviteAugment(personaId, p.code);
+        this.audit?.append({
+          actor: { id: personaId, name: this.displayName(personaId), kind: 'persona' },
+          action: 'claim_invite',
+          target: p.code,
+          ok: true,
+          after: { roles: result.roles },
+        });
+        return result;
+      }
+      case 'rotate_token': {
+        const token = this.rotatePersonaToken(personaId);
+        this.audit?.append({
+          actor: { id: personaId, name: this.displayName(personaId), kind: 'persona' },
+          action: 'rotate_token',
+          target: personaId,
+          ok: true,
+        });
+        return { token };
       }
       default:
         throw rpcError('INVALID_PARAMS', `unknown method ${String(method)}`);
