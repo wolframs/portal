@@ -14,6 +14,39 @@ const CAPS = [
   'CREATE_THREADS', 'ATTACH_FILES', 'ADD_REACTIONS', 'MENTION_EVERYONE',
   'EDIT_OWN', 'DELETE_OWN', 'MANAGE_MESSAGES', 'MANAGE_CHANNELS',
 ];
+// Capabilities grouped for display/editing (purely a UI grouping — the wire
+// model is still the flat per-cap set). Read / Write / and the three "elevated"
+// singletons that each deserve their own line.
+const CAP_GROUPS = [
+  { label: 'Read', caps: ['VIEW_CHANNEL', 'READ_HISTORY'] },
+  { label: 'Write', caps: ['SEND_MESSAGES', 'SEND_IN_THREADS', 'CREATE_THREADS', 'ATTACH_FILES', 'ADD_REACTIONS', 'EDIT_OWN', 'DELETE_OWN'] },
+  { label: 'Mention everyone', caps: ['MENTION_EVERYONE'] },
+  { label: 'Manage messages', caps: ['MANAGE_MESSAGES'] },
+  { label: 'Manage channels', caps: ['MANAGE_CHANNELS'] },
+];
+const CAP_SHORT = {
+  VIEW_CHANNEL: 'view', READ_HISTORY: 'history', SEND_MESSAGES: 'send',
+  SEND_IN_THREADS: 'in-threads', CREATE_THREADS: 'threads', ATTACH_FILES: 'files',
+  ADD_REACTIONS: 'react', EDIT_OWN: 'edit', DELETE_OWN: 'delete',
+  MENTION_EVERYONE: 'mention', MANAGE_MESSAGES: 'manage-msgs', MANAGE_CHANNELS: 'manage-chans',
+};
+const capShort = (c) => CAP_SHORT[c] || c.toLowerCase();
+
+// Compact read-only summary: a fully-present group shows as its label; partial
+// groups list their present caps (short). e.g. "Read · Write" or "Read · send, files".
+function capsSummary(caps) {
+  const set = new Set(caps || []);
+  if (!set.size) return '—';
+  const out = [];
+  for (const g of CAP_GROUPS) {
+    const present = g.caps.filter((c) => set.has(c));
+    if (!present.length) continue;
+    if (present.length === g.caps.length) out.push(g.label);
+    else out.push(present.map(capShort).join(', '));
+  }
+  return out.join(' · ');
+}
+
 const LIMIT = 50;
 
 const state = {
@@ -370,10 +403,10 @@ function grantEditor(id, policy0, channels) {
     const chans = (policy && policy.channels) || {};
     const keys = Object.keys(chans);
     const rows = [];
-    if (gd.length) rows.push(el('tr', {}, [el('td', { text: 'guild-default' }), el('td', { class: 'cell-roles', text: gd.join(', ') }), el('td', {}, [el('button', { class: 'btn btn-sm btn-danger', text: 'clear', onclick: () => clearGrant(id, null, draw) })])]));
+    if (gd.length) rows.push(el('tr', {}, [el('td', { text: 'guild-default' }), el('td', { class: 'cell-roles', text: capsSummary(gd) }), el('td', {}, [el('button', { class: 'btn btn-sm btn-danger', text: 'clear', onclick: () => clearGrant(id, null, draw) })])]));
     for (const cid of keys) rows.push(el('tr', {}, [
       el('td', {}, [el('code', { text: channelName(channels, cid) })]),
-      el('td', { class: 'cell-roles', text: (chans[cid] || []).join(', ') }),
+      el('td', { class: 'cell-roles', text: capsSummary(chans[cid] || []) }),
       el('td', {}, [el('button', { class: 'btn btn-sm btn-danger', text: 'clear', onclick: () => clearGrant(id, cid, draw) })]),
     ]));
     body.appendChild(table([{ label: 'Target' }, { label: 'Caps' }, { label: '', cls: 'col-narrow' }], rows));
@@ -507,8 +540,8 @@ function scopeSummary(scope) {
 }
 function grantSummary(inv) {
   if (inv.roles && inv.roles.length) return 'roles: ' + inv.roles.join(', ');
-  if (inv.grant) return 'grant{' + scopeSummary(inv.grant.scope) + '} ' + (inv.grant.caps || []).join(',');
-  if (inv.caps && inv.caps.length) return 'blanket(deprecated): ' + inv.caps.join(',');
+  if (inv.grant) return 'grant{' + scopeSummary(inv.grant.scope) + '} ' + capsSummary(inv.grant.caps);
+  if (inv.caps && inv.caps.length) return 'blanket(deprecated): ' + capsSummary(inv.caps);
   return 'deny';
 }
 
@@ -648,7 +681,7 @@ async function openIdentityDrawer(id) {
       ? el('ul', { class: 'plain' }, roles.map((r) => el('li', {}, [
           el('strong', { text: r.name }),
           r.scope ? el('span', { class: 'muted', text: ' — ' + scopeSummary(r.scope) + (r.guildId ? ' @ ' + (gname[r.guildId] || r.guildId) : '') }) : null,
-          el('div', { class: 'cell-roles', text: (r.caps || []).join(', ') }),
+          el('div', { class: 'cell-roles', text: capsSummary(r.caps) }),
         ])))
       : el('p', { class: 'muted', text: 'No roles.' }),
   ]));
@@ -658,11 +691,11 @@ async function openIdentityDrawer(id) {
   const polGuilds = pol && pol.guilds ? Object.entries(pol.guilds) : [];
   if ((pol && pol.default && pol.default.length) || polGuilds.length) {
     const kids = [];
-    if (pol.default && pol.default.length) kids.push(el('div', { class: 'cell-roles', text: 'global default: ' + pol.default.join(', ') }));
+    if (pol.default && pol.default.length) kids.push(el('div', { class: 'cell-roles', text: 'global default: ' + capsSummary(pol.default) }));
     for (const [gid, gp] of polGuilds) {
       const lines = [];
-      if (gp.default && gp.default.length) lines.push(el('div', { class: 'cell-roles', text: 'guild default: ' + gp.default.join(', ') }));
-      for (const [cid, caps] of Object.entries(gp.channels || {})) lines.push(el('div', { class: 'cell-roles' }, [el('code', { text: cid }), ': ' + (caps || []).join(', ')]));
+      if (gp.default && gp.default.length) lines.push(el('div', { class: 'cell-roles', text: 'guild default: ' + capsSummary(gp.default) }));
+      for (const [cid, caps] of Object.entries(gp.channels || {})) lines.push(el('div', { class: 'cell-roles' }, [el('code', { text: cid }), ': ' + capsSummary(caps)]));
       kids.push(el('div', { class: 'grant-guild' }, [el('strong', { text: gname[gid] || gid }), el('span', { class: 'muted mono', text: ' ' + gid }), ...lines]));
     }
     body.appendChild(section('Ad-hoc grants', kids));
@@ -693,9 +726,30 @@ async function tokenAction(id, action) {
 
 // ── Shared widgets ───────────────────────────────────────────────────────────
 
-function capsCheckboxes() {
-  const node = el('div', { class: 'caps-grid' });
-  const boxes = CAPS.map((c) => { const cb = el('input', { type: 'checkbox', value: c }); node.appendChild(el('label', { class: 'cap' }, [cb, c])); return cb; });
+function capsCheckboxes(selected) {
+  const sel = new Set(selected || []);
+  const node = el('div', { class: 'caps-groups' });
+  const boxes = [];
+  for (const g of CAP_GROUPS) {
+    if (g.caps.length === 1) {
+      // Elevated singleton: one checkbox, labelled with the group name.
+      const cb = el('input', { type: 'checkbox', value: g.caps[0], checked: sel.has(g.caps[0]) });
+      boxes.push(cb);
+      node.appendChild(el('label', { class: 'cap-row' }, [cb, el('span', { class: 'cap-name', text: g.label })]));
+      continue;
+    }
+    // Multi-cap group: a roll-up toggle + the individual caps as small chips.
+    const children = g.caps.map((c) => { const cb = el('input', { type: 'checkbox', value: c, checked: sel.has(c) }); boxes.push(cb); return cb; });
+    const roll = el('input', { type: 'checkbox' });
+    const sync = () => { const on = children.filter((b) => b.checked).length; roll.checked = on === children.length; roll.indeterminate = on > 0 && on < children.length; };
+    roll.addEventListener('change', () => { children.forEach((b) => { b.checked = roll.checked; }); });
+    children.forEach((b) => b.addEventListener('change', sync));
+    sync();
+    node.appendChild(el('div', { class: 'cap-group' }, [
+      el('label', { class: 'cap-row' }, [roll, el('span', { class: 'cap-name', text: g.label })]),
+      el('div', { class: 'cap-chips' }, children.map((cb, i) => el('label', { class: 'cap-chip' }, [cb, el('span', { text: capShort(g.caps[i]) })]))),
+    ]));
+  }
   return { node, values: () => boxes.filter((b) => b.checked).map((b) => b.value) };
 }
 

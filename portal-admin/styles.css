@@ -135,7 +135,7 @@ code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
 /* ── Drawer ── */
 .drawer-scrim { position: fixed; inset: 0; background: rgba(0,0,0,.35); z-index: 30; }
 .drawer {
-  position: fixed; top: 0; right: 0; height: 100vh; width: 460px; max-width: 92vw; z-index: 31;
+  position: fixed; top: 0; right: 0; height: 100vh; width: 520px; max-width: 94vw; z-index: 31;
   background: var(--panel); border-left: 1px solid var(--line); display: flex; flex-direction: column;
   box-shadow: -8px 0 24px rgba(0,0,0,.18);
 }
@@ -153,9 +153,14 @@ code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
 .plain { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
 
 /* ── Caps grid ── */
-.caps-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 12px; }
-.caps-grid .cap { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--fg); }
-.caps-grid .cap input { width: auto; }
+/* Grouped capability editor — vertical, fits the narrow drawer. */
+.caps-groups { display: flex; flex-direction: column; gap: 9px; }
+.cap-row { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--fg); }
+.cap-row .cap-name { font-weight: 600; }
+.cap-row input { width: auto; }
+.cap-chips { display: flex; flex-wrap: wrap; gap: 3px 12px; margin: 4px 0 0 22px; }
+.cap-chip { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--muted); }
+.cap-chip input { width: auto; }
 
 /* ── Modal (one-time secret) ── */
 .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: grid; place-items: center; z-index: 40; }
