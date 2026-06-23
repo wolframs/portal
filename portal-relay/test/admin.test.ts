@@ -114,7 +114,7 @@ function fakeDiscordFetch(guilds: unknown[]): typeof fetch {
   }) as unknown as typeof fetch;
 }
 
-function setupDeps(superadmins: string[]): {
+function setupDeps(superadmins: string[], guildAdmins: Record<string, string[]> = {}): {
   deps: AdminDeps;
   identity: IdentityStore;
   permissions: PermissionsStore;
@@ -146,6 +146,7 @@ function setupDeps(superadmins: string[]): {
     redirectUri: 'https://example.test/admin/callback',
     postLoginUrl: '/done',
     superadmins,
+    guildAdmins,
     sessionTtlMs: 60_000,
     auditPath: join(dir, 'audit.jsonl'),
     cookieSecure: false,
@@ -255,6 +256,39 @@ test('integration: guild-admin can read own guild, blocked cross-guild', async (
     // No session: 401.
     const anon = await fetch(`${base}/admin/me`);
     assert.equal(anon.status, 401);
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});
+
+test('integration: per-guild allowlist grants guild-admin without Discord perms', async () => {
+  // admin1 has NO qualifying Discord perms anywhere, but the operator allowlist
+  // names them for G2 → guild-admin there, and nowhere else.
+  const { deps, cleanup } = setupDeps([], { G2: ['admin1'] });
+  const server = new AdminServer(deps, fakeDiscordFetch([
+    { id: 'G1', name: 'Guild One', permissions: '0' },
+    { id: 'G2', name: 'Guild Two', permissions: '0' },
+  ]));
+  await server.listen();
+  const base = `http://127.0.0.1:${server.boundPort}`;
+  try {
+    const session = await login(base, []);
+    const auth = { headers: { cookie: `portal_admin_session=${session}` } };
+    const me = await (await fetch(`${base}/admin/me`, auth)).json();
+    assert.equal(me.isSuper, false, 'allowlist does not confer super-admin');
+
+    // Allowlisted guild: reachable.
+    const g2 = await fetch(`${base}/admin/g/G2/invites`, auth);
+    assert.equal(g2.status, 200, 'allowlisted guild reachable');
+
+    // Non-allowlisted, non-Discord-admin guild: still blocked.
+    const g1 = await fetch(`${base}/admin/g/G1/invites`, auth);
+    assert.equal(g1.status, 403, 'non-allowlisted guild still blocked');
+
+    // Catalog authoring stays super-admin-only.
+    const roles = await (await fetch(`${base}/admin/g/G2/roles`, auth)).json();
+    assert.equal(roles.canAuthor, false, 'guild-admin via allowlist cannot author catalog');
   } finally {
     await server.close();
     cleanup();

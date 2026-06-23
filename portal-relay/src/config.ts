@@ -165,6 +165,10 @@ export interface AdminConfig {
   postLoginUrl: string;
   /** Operator super-admins: Discord user ids with global authority. */
   superadmins: string[];
+  /** Per-guild operator allowlist: guildId → Discord user ids granted guild-admin
+   *  for THAT guild only, regardless of their live Discord permissions. Narrower
+   *  than `superadmins` (global). Sourced from PORTAL_GUILD_ADMINS (JSON). */
+  guildAdmins: Record<string, string[]>;
   /** Server-side session TTL (ms). Short — admin rights are re-derived on login. */
   sessionTtlMs: number;
   /** Append-only audit log path (JSONL). */
@@ -245,6 +249,7 @@ function loadAdminConfig(): AdminConfig | undefined {
     redirectUri: requireEnv('PORTAL_OAUTH_REDIRECT_URI'),
     postLoginUrl: process.env.PORTAL_ADMIN_POST_LOGIN_URL ?? '/',
     superadmins: splitCsv(process.env.PORTAL_SUPERADMINS),
+    guildAdmins: parseGuildAdmins(process.env.PORTAL_GUILD_ADMINS),
     sessionTtlMs: parseInt(process.env.PORTAL_ADMIN_SESSION_TTL_MS ?? String(30 * 60 * 1000), 10),
     auditPath: requireEnv('PORTAL_ADMIN_AUDIT'),
     cookieSecure: process.env.PORTAL_ADMIN_COOKIE_INSECURE !== 'true',
@@ -259,4 +264,27 @@ function requireEnv(name: string): string {
 
 function splitCsv(v: string | undefined): string[] {
   return (v ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+}
+
+/**
+ * Parse PORTAL_GUILD_ADMINS — a JSON object mapping guild id → array of Discord
+ * user ids granted guild-admin for that guild. Malformed/absent → {} (fail-closed:
+ * grants no extra admins). Non-string ids and empty arrays are dropped.
+ */
+function parseGuildAdmins(v: string | undefined): Record<string, string[]> {
+  if (!v || !v.trim()) return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(v);
+  } catch {
+    return {};
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+  const out: Record<string, string[]> = {};
+  for (const [gid, uids] of Object.entries(parsed as Record<string, unknown>)) {
+    if (!gid || !Array.isArray(uids)) continue;
+    const ids = uids.filter((u): u is string => typeof u === 'string' && u.length > 0);
+    if (ids.length) out[gid] = ids;
+  }
+  return out;
 }

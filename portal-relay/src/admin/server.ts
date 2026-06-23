@@ -277,11 +277,25 @@ export class AdminServer {
     }
 
     const isSuper = this.deps.config.superadmins.includes(result.user.id);
+    // Per-guild operator allowlist (RFC-005 §5.3): grant guild-admin for guilds
+    // that explicitly list this user, even when their live Discord perms don't
+    // qualify (e.g. a role with most perms but not Manage Server). Scoped to the
+    // named guilds only — strictly narrower than super-admin.
+    const adminGuilds = new Set(result.adminGuilds);
+    const guildNames: Record<string, string> = { ...result.guildNames };
+    for (const [gid, uids] of Object.entries(this.deps.config.guildAdmins ?? {})) {
+      if (!uids.includes(result.user.id)) continue;
+      adminGuilds.add(gid);
+      if (!guildNames[gid]) {
+        const g = this.deps.listGuilds().find((x) => x.id === gid);
+        if (g) guildNames[gid] = g.name;
+      }
+    }
     const session = this.sessions.create({
       userId: result.user.id,
       userName: result.user.global_name || result.user.username,
-      adminGuilds: new Set(result.adminGuilds),
-      guildNames: result.guildNames,
+      adminGuilds,
+      guildNames,
       isSuper,
     });
     setCookie(res, SESSION_COOKIE, session.id, {
@@ -295,7 +309,7 @@ export class AdminServer {
       actor: { id: session.userId, name: session.userName, kind: 'admin' },
       action: 'login.ok',
       ok: true,
-      detail: { isSuper, adminGuilds: result.adminGuilds },
+      detail: { isSuper, adminGuilds: [...adminGuilds] },
     });
     redirect(res, this.deps.config.postLoginUrl);
   }
