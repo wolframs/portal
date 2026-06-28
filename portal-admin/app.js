@@ -649,12 +649,13 @@ async function renderIdentities(view) {
   clear(view);
   view.appendChild(toolbar('Search all personas…', []));
   const rows = (data.personas || []).map((p) => rowClick(el('tr', { onclick: () => openIdentityDrawer(p.id) }, [
+    el('td', { class: 'col-narrow' }, [avatarThumb(p.avatarUrl, p.displayName || p.id)]),
     el('td', { text: p.displayName || p.id }),
     el('td', {}, [el('code', { text: p.id })]),
     el('td', { class: 'cell-roles', text: (p.roles || []).join(', ') || '—' }),
     el('td', { class: 'col-narrow', text: String(p.guildCount != null ? p.guildCount : '—') }),
   ])));
-  view.appendChild(table([{ label: 'Name' }, { label: 'Id' }, { label: 'Roles' }, { label: 'Guilds', cls: 'col-narrow' }], rows));
+  view.appendChild(table([{ label: '', cls: 'col-narrow' }, { label: 'Name' }, { label: 'Id' }, { label: 'Roles' }, { label: 'Guilds', cls: 'col-narrow' }], rows));
   view.appendChild(pager(data));
   view.appendChild(el('p', { class: 'hint muted', text: 'Global identity registry. Token lifecycle (rotate / revoke) lives here only — a token authenticates a persona everywhere, so it is not a per-guild action.' }));
 }
@@ -664,6 +665,24 @@ async function openIdentityDrawer(id) {
   try { d = await api('GET', '/admin/personas/' + encodeURIComponent(id)); }
   catch (e) { banner('Load failed: ' + e.message, 'err'); return; }
   const body = el('div', { class: 'drawer-sections' });
+
+  // Profile picture (global identity).
+  const avImg = avatarThumb(d.avatarUrl, d.displayName || id, 'avatar-preview');
+  const avInput = el('input', { type: 'text', value: d.avatar || '', placeholder: 'https://…/avatar.png' });
+  const saveAv = el('button', { class: 'btn btn-sm btn-primary', text: 'Save' });
+  saveAv.addEventListener('click', async () => {
+    try {
+      const r = await api('PUT', '/admin/personas/' + encodeURIComponent(id) + '/avatar', { avatar: avInput.value.trim() });
+      avInput.value = r.avatar || '';
+      if (r.avatarUrl) { avImg.src = r.avatarUrl; avImg.classList.remove('hidden'); } else { avImg.removeAttribute('src'); avImg.classList.add('hidden'); }
+      banner('Avatar updated — applies to the persona’s next message.');
+    } catch (e) { banner('Avatar update failed: ' + e.message, 'err'); }
+  });
+  const clearAv = el('button', { class: 'btn btn-sm', text: 'Clear', onclick: () => { avInput.value = ''; saveAv.click(); } });
+  body.appendChild(section('Profile picture', [
+    el('div', { class: 'avatar-row' }, [avImg, el('div', { class: 'avatar-edit' }, [avInput, el('div', { class: 'inline' }, [saveAv, clearAv])])]),
+    el('p', { class: 'muted', text: 'Image URL (or a filename if the relay has an avatar base URL). Discord fetches it on the next message; past messages keep their old picture.' }),
+  ]));
 
   const guilds = d.guilds || [];
   const gname = {}; guilds.forEach((g) => { gname[g.id] = g.name; });
@@ -725,6 +744,12 @@ async function tokenAction(id, action) {
 }
 
 // ── Shared widgets ───────────────────────────────────────────────────────────
+
+function avatarThumb(url, alt, cls) {
+  const img = el('img', { class: 'avatar-thumb' + (cls ? ' ' + cls : ''), alt: alt || '' });
+  if (url) img.src = url; else img.classList.add('hidden');
+  return img;
+}
 
 function capsCheckboxes(selected) {
   const sel = new Set(selected || []);

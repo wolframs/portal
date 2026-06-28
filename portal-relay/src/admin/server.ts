@@ -595,6 +595,7 @@ export class AdminServer {
         .map((p) => ({
           id: p.id,
           displayName: p.displayName,
+          avatarUrl: this.deps.identity.avatarUrl(p),
           roles: this.deps.permissions.getRoleNames(p.id),
           guildCount: this.guildsWithAccess(p.id).length,
         }));
@@ -613,6 +614,8 @@ export class AdminServer {
       return sendJson(res, 200, {
         id: p.id,
         displayName: p.displayName,
+        avatar: p.avatar,
+        avatarUrl: this.deps.identity.avatarUrl(p),
         roles,
         // Inline per-persona policy (ad-hoc grants), if any.
         policy: entry?.policy ?? null,
@@ -625,6 +628,26 @@ export class AdminServer {
     if (method === 'POST' && tok) {
       if (!this.csrfOk(req, session)) return sendJson(res, 403, err('CSRF', 'missing or invalid CSRF token'));
       return this.personaToken(res, session, decodeURIComponent(tok[1]), await readJson(req));
+    }
+    // PUT /admin/personas/:id/avatar — set the persona's profile picture (global
+    // identity, super-admin). Value is an image URL, or a bare filename when the
+    // relay has PORTAL_AVATAR_BASE_URL; empty clears it. Applies to new messages.
+    const av = /^\/admin\/personas\/([^/]+)\/avatar$/.exec(path);
+    if (method === 'PUT' && av) {
+      if (!this.csrfOk(req, session)) return sendJson(res, 403, err('CSRF', 'missing or invalid CSRF token'));
+      const id = decodeURIComponent(av[1]);
+      const cur = this.deps.identity.get(id);
+      if (!cur) return sendJson(res, 404, err('NOT_FOUND', 'no such persona'));
+      const body = await readJson(req);
+      const avatar = typeof body?.avatar === 'string' ? body.avatar.trim() : '';
+      // Accept: empty (clear), an http(s) URL, or a safe bare filename (no paths).
+      if (!(avatar === '' || /^https?:\/\/.+/i.test(avatar) || /^[A-Za-z0-9._-]+$/.test(avatar))) {
+        return sendJson(res, 400, err('INVALID', 'avatar must be an http(s) URL or a plain filename'));
+      }
+      this.deps.identity.upsert({ ...cur, avatar });
+      const next = this.deps.identity.get(id)!;
+      this.audit.append({ actor: this.actorOf(session), action: 'persona.avatar.set', target: id, ok: true, after: { avatar } });
+      return sendJson(res, 200, { avatar: next.avatar, avatarUrl: this.deps.identity.avatarUrl(next) });
     }
     sendJson(res, 404, err('NOT_FOUND', 'no such route'));
   }

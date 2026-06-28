@@ -153,6 +153,13 @@ code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
 .plain { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
 
 /* ── Caps grid ── */
+/* Avatars */
+.avatar-thumb { width: 22px; height: 22px; border-radius: 50%; object-fit: cover; vertical-align: middle; background: var(--zebra); border: 1px solid var(--line); }
+.avatar-preview { width: 56px; height: 56px; }
+.avatar-row { display: flex; gap: 12px; align-items: flex-start; }
+.avatar-edit { flex: 1; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.avatar-edit input { width: 100%; }
+
 /* Grouped capability editor — vertical, fits the narrow drawer. */
 .caps-groups { display: flex; flex-direction: column; gap: 9px; }
 .cap-row { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--fg); }

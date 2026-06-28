@@ -590,6 +590,57 @@ test('hashed tokens: plaintext never authenticates; rotation works', () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
+test('integration: super-admin sets/clears persona avatar (global identity)', async () => {
+  const ctx = setupDeps(['admin1']);
+  const server = new AdminServer(ctx.deps, fakeDiscordFetch([{ id: 'G1', name: 'G1', permissions: '0' }]));
+  await server.listen();
+  const base = `http://127.0.0.1:${server.boundPort}`;
+  try {
+    const session = await login(base, []);
+    const me = await (await fetch(`${base}/admin/me`, { headers: { cookie: `portal_admin_session=${session}` } })).json();
+    const hdr = { cookie: `portal_admin_session=${session}`, 'content-type': 'application/json', 'x-csrf-token': me.csrf };
+
+    const ok = await fetch(`${base}/admin/personas/p1/avatar`, { method: 'PUT', headers: hdr, body: JSON.stringify({ avatar: 'https://example.test/a.png' }) });
+    assert.equal(ok.status, 200);
+    assert.equal((await ok.json()).avatar, 'https://example.test/a.png');
+    assert.equal(ctx.identity.get('p1')!.avatar, 'https://example.test/a.png');
+    // Token still authenticates — avatar change must not disturb identity auth.
+    assert.ok(ctx.identity.authenticate('t1', 'p1'));
+
+    // Path-traversal / junk rejected.
+    const bad = await fetch(`${base}/admin/personas/p1/avatar`, { method: 'PUT', headers: hdr, body: JSON.stringify({ avatar: '../../etc/passwd' }) });
+    assert.equal(bad.status, 400);
+
+    // Clear.
+    const clr = await fetch(`${base}/admin/personas/p1/avatar`, { method: 'PUT', headers: hdr, body: JSON.stringify({ avatar: '' }) });
+    assert.equal(clr.status, 200);
+    assert.equal(ctx.identity.get('p1')!.avatar, '');
+  } finally {
+    await server.close();
+    ctx.cleanup();
+  }
+});
+
+test('integration: guild-admin cannot set avatar (global = super-admin only)', async () => {
+  const ctx = setupDeps([]);
+  const server = new AdminServer(ctx.deps, fakeDiscordFetch([{ id: 'G1', name: 'G1', permissions: MANAGE_GUILD }]));
+  await server.listen();
+  const base = `http://127.0.0.1:${server.boundPort}`;
+  try {
+    const session = await login(base, []);
+    const me = await (await fetch(`${base}/admin/me`, { headers: { cookie: `portal_admin_session=${session}` } })).json();
+    const res = await fetch(`${base}/admin/personas/p1/avatar`, {
+      method: 'PUT',
+      headers: { cookie: `portal_admin_session=${session}`, 'content-type': 'application/json', 'x-csrf-token': me.csrf },
+      body: JSON.stringify({ avatar: 'https://example.test/a.png' }),
+    });
+    assert.equal(res.status, 403);
+  } finally {
+    await server.close();
+    ctx.cleanup();
+  }
+});
+
 test('integration: tampered oauth state is rejected', async () => {
   const { deps, cleanup } = setupDeps([]);
   const server = new AdminServer(deps, fakeDiscordFetch([]));
