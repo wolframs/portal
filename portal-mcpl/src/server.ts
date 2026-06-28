@@ -209,6 +209,10 @@ export class PortalMcplServer {
     });
     this.client.on('messageDelete', (e) => {
       if (!this.conn || !this.mcplEnabled) return;
+      // Only surface deletions for channels the host actually has open — a delete
+      // in a channel the agent isn't following is zero-signal context noise.
+      // (The relay also gates deletes by subscription; this is belt-and-braces.)
+      if (!this.openChannels.has(e.channelId)) return;
       this.conn
         .sendRequest(method.PUSH_EVENT, {
           featureSet: 'portal.messaging',

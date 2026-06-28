@@ -840,11 +840,19 @@ export class Relay implements GatewayHooks {
     this.history.invalidate(channelId);
     const ref = this.store.getByDiscordId(messageId);
     const relayId = ref?.relayId ?? messageId;
+    const targetChannel = ref?.channelId ?? channelId;
     this.store.remove(messageId);
+    // Gate like message/reaction delivery: only notify personas subscribed to the
+    // channel (or whose own message was deleted). Without this, every persona
+    // received delete events for every channel — context-eroding noise for
+    // channels they don't even follow.
     for (const personaId of this.gateway.activePersonas()) {
+      const subscribed = this.gateway.personaSubscribed(personaId, targetChannel);
+      const owner = ref?.personaId === personaId;
+      if (!subscribed && !owner) continue;
       this.gateway.dispatch(personaId, {
         type: 'message_delete',
-        channelId: ref?.channelId ?? channelId,
+        channelId: targetChannel,
         threadId: ref?.threadId,
         messageId: relayId,
       });
