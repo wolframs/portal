@@ -714,36 +714,41 @@ export class Relay implements GatewayHooks {
         channelId: inc.channelId, parent: inc.parentChannelId, guildId: inc.guildId,
         webhookId: inc.webhookId, own: inc.webhookId ? this.bot.ownsWebhook(inc.webhookId) : false,
         roles: inc.mentionRoleIds, content: inc.content.slice(0, 40),
+        replyToId: inc.replyToId ?? null, replyToUserId: inc.replyToUserId ?? null,
+        replyPinged: inc.replyToUserId != null,
         active: this.gateway.activePersonas(),
       }));
     }
     this.history.invalidate(inc.channelId); // new message changes the latest page
     const { message, authorPersonaId } = this.buildPortalMessage(inc);
-    this.deliverMessage('message_create', message, authorPersonaId);
+    // A reply only addresses the replied-to persona when the @mention toggle was
+    // left on (repliedUser populated → replyToUserId non-null), matching native bots.
+    this.deliverMessage('message_create', message, authorPersonaId, inc.replyToUserId != null);
   }
 
   /** Inbound (human/bot) edit → message_update to interested personas. */
   private onDiscordEdit(inc: IncomingMessage): void {
     this.history.invalidate(inc.channelId);
     const { message, authorPersonaId } = this.buildPortalMessage(inc);
-    this.deliverMessage('message_update', message, authorPersonaId);
+    this.deliverMessage('message_update', message, authorPersonaId, inc.replyToUserId != null);
   }
 
   /** Shared per-persona delivery + addressing for create/update. */
   private deliverMessage(
     type: 'message_create' | 'message_update',
     message: PortalMessage,
-    authorPersonaId?: string,
+    authorPersonaId: string | undefined,
+    replyPinged: boolean,
   ): void {
     // Durable, server-authoritative accumulation for EVERY persona (online or
     // not) — the substrate for offline catch-up. Only on create, so edits don't
     // double-count.
-    if (type === 'message_create') this.accumulateReadState(message, authorPersonaId);
+    if (type === 'message_create') this.accumulateReadState(message, authorPersonaId, replyPinged);
 
     // Live dispatch: connected sessions only, addressed OR live-subscribed.
     for (const personaId of this.gateway.activePersonas()) {
       if (authorPersonaId && personaId === authorPersonaId) continue; // not your own message
-      const reasons = this.reasonsFor(message, personaId);
+      const reasons = this.reasonsFor(message, personaId, replyPinged);
       const addressedToMe = reasons.length > 0;
       const subscribed = this.gateway.personaSubscribed(personaId, message.channelId);
       if (!addressedToMe && !subscribed) continue;
@@ -752,11 +757,15 @@ export class Relay implements GatewayHooks {
     }
   }
 
-  /** Why a message is addressed to a persona: role mention and/or reply. */
-  private reasonsFor(message: PortalMessage, personaId: string): AddressReason[] {
+  /** Why a message is addressed to a persona: role mention and/or a *pinged*
+   *  reply. A reply only counts when the replying user kept the @mention toggle
+   *  on — Discord's `repliedUser` (→ `replyToUserId`) is non-null only then. This
+   *  mirrors a native bot, which wakes on a ping-on reply but not a ping-off one,
+   *  so a webhook persona no longer force-activates on every reply. */
+  private reasonsFor(message: PortalMessage, personaId: string, replyPinged: boolean): AddressReason[] {
     const reasons: AddressReason[] = [];
     if (message.mentions.personas.includes(personaId)) reasons.push('role_mention');
-    if (message.replyToId) {
+    if (message.replyToId && replyPinged) {
       const ref = this.store.getByRelayId(message.replyToId);
       if (ref?.personaId === personaId) reasons.push('reply');
     }
@@ -770,11 +779,11 @@ export class Relay implements GatewayHooks {
    * offline persona's unread reflects all channels it can read — the "all
    * personas, all channels" policy — without leaking channels it can't see).
    */
-  private accumulateReadState(message: PortalMessage, authorPersonaId?: string): void {
+  private accumulateReadState(message: PortalMessage, authorPersonaId: string | undefined, replyPinged: boolean): void {
     for (const cfg of this.identity.all()) {
       const personaId = cfg.id;
       if (authorPersonaId && personaId === authorPersonaId) continue;
-      const reasons = this.reasonsFor(message, personaId);
+      const reasons = this.reasonsFor(message, personaId, replyPinged);
       const addressedToMe = reasons.length > 0;
       if (!addressedToMe && !this.personaCanViewChannel(personaId, message.channelId, message.guildId)) {
         continue;
