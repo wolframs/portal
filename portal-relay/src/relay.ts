@@ -708,29 +708,39 @@ export class Relay implements GatewayHooks {
 
   // ── Inbound Discord → PortalEvents ──
 
+  /**
+   * Whether a reply *pinged* its target, i.e. the replying user left the @mention
+   * toggle on. `replyToUserId` (discord.js `repliedUser`) resolves the referenced
+   * author for ANY reply, so it alone is not the signal — the toggle is whether
+   * that same author id also appears in the message's mention list (Discord only
+   * adds them when mention_author is on). Mirrors how a native bot wakes on a
+   * ping-on reply but not a ping-off one.
+   */
+  private replyPinged(inc: IncomingMessage): boolean {
+    return inc.replyToUserId != null && inc.mentionUserIds.includes(inc.replyToUserId);
+  }
+
   private onDiscordMessage(inc: IncomingMessage): void {
+    const replyPinged = this.replyPinged(inc);
     if (process.env.PORTAL_DEBUG) {
       console.error('[relay] inbound', JSON.stringify({
         channelId: inc.channelId, parent: inc.parentChannelId, guildId: inc.guildId,
         webhookId: inc.webhookId, own: inc.webhookId ? this.bot.ownsWebhook(inc.webhookId) : false,
-        roles: inc.mentionRoleIds, content: inc.content.slice(0, 40),
-        replyToId: inc.replyToId ?? null, replyToUserId: inc.replyToUserId ?? null,
-        replyPinged: inc.replyToUserId != null,
+        roles: inc.mentionRoleIds, mentionedUsers: inc.mentionUserIds, content: inc.content.slice(0, 40),
+        replyToId: inc.replyToId ?? null, replyToUserId: inc.replyToUserId ?? null, replyPinged,
         active: this.gateway.activePersonas(),
       }));
     }
     this.history.invalidate(inc.channelId); // new message changes the latest page
     const { message, authorPersonaId } = this.buildPortalMessage(inc);
-    // A reply only addresses the replied-to persona when the @mention toggle was
-    // left on (repliedUser populated → replyToUserId non-null), matching native bots.
-    this.deliverMessage('message_create', message, authorPersonaId, inc.replyToUserId != null);
+    this.deliverMessage('message_create', message, authorPersonaId, replyPinged);
   }
 
   /** Inbound (human/bot) edit → message_update to interested personas. */
   private onDiscordEdit(inc: IncomingMessage): void {
     this.history.invalidate(inc.channelId);
     const { message, authorPersonaId } = this.buildPortalMessage(inc);
-    this.deliverMessage('message_update', message, authorPersonaId, inc.replyToUserId != null);
+    this.deliverMessage('message_update', message, authorPersonaId, this.replyPinged(inc));
   }
 
   /** Shared per-persona delivery + addressing for create/update. */
@@ -758,8 +768,7 @@ export class Relay implements GatewayHooks {
   }
 
   /** Why a message is addressed to a persona: role mention and/or a *pinged*
-   *  reply. A reply only counts when the replying user kept the @mention toggle
-   *  on — Discord's `repliedUser` (→ `replyToUserId`) is non-null only then. This
+   *  reply (see replyPinged() — the reply must have the @mention toggle on). This
    *  mirrors a native bot, which wakes on a ping-on reply but not a ping-off one,
    *  so a webhook persona no longer force-activates on every reply. */
   private reasonsFor(message: PortalMessage, personaId: string, replyPinged: boolean): AddressReason[] {
