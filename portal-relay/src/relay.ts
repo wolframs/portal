@@ -708,57 +708,42 @@ export class Relay implements GatewayHooks {
 
   // ── Inbound Discord → PortalEvents ──
 
-  /**
-   * Whether a reply *pinged* its target, i.e. the replying user left the @mention
-   * toggle on. `replyToUserId` (discord.js `repliedUser`) resolves the referenced
-   * author for ANY reply, so it alone is not the signal — the toggle is whether
-   * that same author id also appears in the message's mention list (Discord only
-   * adds them when mention_author is on). Mirrors how a native bot wakes on a
-   * ping-on reply but not a ping-off one.
-   */
-  private replyPinged(inc: IncomingMessage): boolean {
-    return inc.replyToUserId != null && inc.mentionUserIds.includes(inc.replyToUserId);
-  }
-
   private onDiscordMessage(inc: IncomingMessage): void {
-    const replyPinged = this.replyPinged(inc);
     if (process.env.PORTAL_DEBUG) {
       console.error('[relay] inbound', JSON.stringify({
         channelId: inc.channelId, parent: inc.parentChannelId, guildId: inc.guildId,
         webhookId: inc.webhookId, own: inc.webhookId ? this.bot.ownsWebhook(inc.webhookId) : false,
-        roles: inc.mentionRoleIds, mentionedUsers: inc.mentionUserIds, content: inc.content.slice(0, 40),
-        replyToId: inc.replyToId ?? null, replyToUserId: inc.replyToUserId ?? null, replyPinged,
+        roles: inc.mentionRoleIds, content: inc.content.slice(0, 40),
         active: this.gateway.activePersonas(),
       }));
     }
     this.history.invalidate(inc.channelId); // new message changes the latest page
     const { message, authorPersonaId } = this.buildPortalMessage(inc);
-    this.deliverMessage('message_create', message, authorPersonaId, replyPinged);
+    this.deliverMessage('message_create', message, authorPersonaId);
   }
 
   /** Inbound (human/bot) edit → message_update to interested personas. */
   private onDiscordEdit(inc: IncomingMessage): void {
     this.history.invalidate(inc.channelId);
     const { message, authorPersonaId } = this.buildPortalMessage(inc);
-    this.deliverMessage('message_update', message, authorPersonaId, this.replyPinged(inc));
+    this.deliverMessage('message_update', message, authorPersonaId);
   }
 
   /** Shared per-persona delivery + addressing for create/update. */
   private deliverMessage(
     type: 'message_create' | 'message_update',
     message: PortalMessage,
-    authorPersonaId: string | undefined,
-    replyPinged: boolean,
+    authorPersonaId?: string,
   ): void {
     // Durable, server-authoritative accumulation for EVERY persona (online or
     // not) — the substrate for offline catch-up. Only on create, so edits don't
     // double-count.
-    if (type === 'message_create') this.accumulateReadState(message, authorPersonaId, replyPinged);
+    if (type === 'message_create') this.accumulateReadState(message, authorPersonaId);
 
     // Live dispatch: connected sessions only, addressed OR live-subscribed.
     for (const personaId of this.gateway.activePersonas()) {
       if (authorPersonaId && personaId === authorPersonaId) continue; // not your own message
-      const reasons = this.reasonsFor(message, personaId, replyPinged);
+      const reasons = this.reasonsFor(message, personaId);
       const addressedToMe = reasons.length > 0;
       const subscribed = this.gateway.personaSubscribed(personaId, message.channelId);
       if (!addressedToMe && !subscribed) continue;
@@ -767,14 +752,11 @@ export class Relay implements GatewayHooks {
     }
   }
 
-  /** Why a message is addressed to a persona: role mention and/or a *pinged*
-   *  reply (see replyPinged() — the reply must have the @mention toggle on). This
-   *  mirrors a native bot, which wakes on a ping-on reply but not a ping-off one,
-   *  so a webhook persona no longer force-activates on every reply. */
-  private reasonsFor(message: PortalMessage, personaId: string, replyPinged: boolean): AddressReason[] {
+  /** Why a message is addressed to a persona: role mention and/or reply. */
+  private reasonsFor(message: PortalMessage, personaId: string): AddressReason[] {
     const reasons: AddressReason[] = [];
     if (message.mentions.personas.includes(personaId)) reasons.push('role_mention');
-    if (message.replyToId && replyPinged) {
+    if (message.replyToId) {
       const ref = this.store.getByRelayId(message.replyToId);
       if (ref?.personaId === personaId) reasons.push('reply');
     }
@@ -788,11 +770,11 @@ export class Relay implements GatewayHooks {
    * offline persona's unread reflects all channels it can read — the "all
    * personas, all channels" policy — without leaking channels it can't see).
    */
-  private accumulateReadState(message: PortalMessage, authorPersonaId: string | undefined, replyPinged: boolean): void {
+  private accumulateReadState(message: PortalMessage, authorPersonaId?: string): void {
     for (const cfg of this.identity.all()) {
       const personaId = cfg.id;
       if (authorPersonaId && personaId === authorPersonaId) continue;
-      const reasons = this.reasonsFor(message, personaId, replyPinged);
+      const reasons = this.reasonsFor(message, personaId);
       const addressedToMe = reasons.length > 0;
       if (!addressedToMe && !this.personaCanViewChannel(personaId, message.channelId, message.guildId)) {
         continue;
