@@ -14,8 +14,15 @@ export class TypedEmitter<Events extends Record<string, (...args: never[]) => vo
   }
 
   emit<K extends keyof Events>(event: K, ...args: Parameters<Events[K]>): void {
-    for (const fn of this.listeners.get(event) ?? []) {
-      (fn as (...a: Parameters<Events[K]>) => void)(...args);
+    // Snapshot listeners (a handler may add/remove during dispatch) and isolate
+    // failures: one throwing listener must not skip the others or propagate to
+    // emit()'s caller (e.g. the reconnect scheduler in onClose).
+    for (const fn of [...(this.listeners.get(event) ?? [])]) {
+      try {
+        (fn as (...a: Parameters<Events[K]>) => void)(...args);
+      } catch (err) {
+        console.error(`[portal-client] listener for "${String(event)}" threw:`, err);
+      }
     }
   }
 }

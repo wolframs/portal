@@ -266,11 +266,21 @@ export class PortalClient extends TypedEmitter<PortalClientEvents> {
     if (this.heartbeat) clearInterval(this.heartbeat);
     this.ready = false;
     const willReconnect = !this.closedByUser;
+
+    // Schedule the reconnect BEFORE notifying listeners. emit() runs listeners
+    // synchronously with no try/catch, so a throwing 'close' handler must not be
+    // able to abort onClose and permanently stall the reconnect loop.
+    if (willReconnect) {
+      const capped = Math.min(this.backoff, this.opts.maxBackoffMs);
+      // Jitter the delay (50–100% of the capped backoff) so a fleet of personas
+      // dropped by a single relay restart reconnect spread out instead of in
+      // lockstep — avoids a thundering-herd reconnect + role-rebind burst.
+      const delay = capped / 2 + Math.random() * (capped / 2);
+      this.backoff = Math.min(this.backoff * 2, this.opts.maxBackoffMs);
+      setTimeout(() => this.open(), delay);
+    }
+
     this.emit('close', { code, willReconnect });
-    if (!willReconnect) return;
-    const delay = Math.min(this.backoff, this.opts.maxBackoffMs);
-    this.backoff = Math.min(this.backoff * 2, this.opts.maxBackoffMs);
-    setTimeout(() => this.open(), delay);
   }
 
   private sendFrame(frame: unknown): void {
