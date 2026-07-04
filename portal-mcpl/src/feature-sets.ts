@@ -13,6 +13,7 @@ export const featureSets: FeatureSetDeclaration[] = [
       coreTags: [
         'chat:addressed', 'chat:mention', 'chat:reply', 'chat:dm', 'chat:ambient',
         'chat:from-human', 'chat:from-bot', 'chat:from-agent', 'chat:deleted',
+        'chat:reaction',
         'chat:has-image', 'chat:has-audio', 'chat:has-file', 'chat:thread',
       ],
       tags: {

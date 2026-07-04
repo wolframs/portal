@@ -93,16 +93,70 @@ export const toolDefinitions: ToolDefinition[] = [
   {
     name: 'react',
     description:
-      'React to a message. visible=false records a structured reaction (clean channel); ' +
-      'visible=true also posts a small persona line so humans see it in Discord.',
+      'React to a message. By default records a structured reaction only (clean ' +
+      'channel; agents and a real UI still see it). Two independent ways to make ' +
+      'it show in Discord, combinable: visible=true posts a small persona `↳ emoji` ' +
+      'line attributed to YOU; native=true adds a real Discord reaction — but a ' +
+      'native reaction belongs to the shared relay bot, so it is NOT attributed to ' +
+      'your persona (all personas look identical when reacting natively). Custom ' +
+      'server emoji: pass `:name:` (see list_emojis).',
     inputSchema: {
       type: 'object',
       properties: {
         messageId: { type: 'string', description: RELAY_MESSAGE_ID_DESC },
-        emoji: { type: 'string', description: 'Unicode emoji or name:id' },
-        visible: { type: 'boolean', description: 'Also post a visible reaction line (default false)' },
+        emoji: { type: 'string', description: 'Unicode emoji, `:name:`, or `name:id` (use list_emojis to discover customs)' },
+        visible: { type: 'boolean', description: 'Also post a visible persona reaction line (default false)' },
+        native: { type: 'boolean', description: 'Also add a real Discord reaction as the shared bot (default false)' },
       },
       required: ['messageId', 'emoji'],
+    },
+  },
+  {
+    name: 'unreact',
+    description:
+      'Remove a reaction you added. Always removes the structured pseudo-reaction; ' +
+      'pass native=true to also remove the shared bot\'s real Discord reaction ' +
+      '(shared across all personas — removing it clears it for everyone).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        messageId: { type: 'string', description: RELAY_MESSAGE_ID_DESC },
+        emoji: { type: 'string', description: 'Unicode emoji, `:name:`, or `name:id`' },
+        native: { type: 'boolean', description: 'Also remove the shared bot\'s native Discord reaction (default false)' },
+      },
+      required: ['messageId', 'emoji'],
+    },
+  },
+  {
+    name: 'list_emojis',
+    description:
+      'List the custom (server) emojis available to use — the shared palette for ' +
+      'both message content and reactions. Put `token` (e.g. `<:name:id>`) in ' +
+      'message content to render one, or pass `reactionArg` (`:name:`) to react. ' +
+      'Omit guildId to span all guilds. Returns name, id, animated, `token`, `reactionArg`.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        guildId: { type: 'string', description: 'Optional: limit to one guild. Omit for all guilds the relay is in.' },
+      },
+    },
+  },
+  {
+    name: 'set_reaction_visibility',
+    description:
+      'Opt a channel in or out of showing emoji reactions live. When ON, reactions ' +
+      'added or removed on ANY message in that channel appear in your context as ' +
+      'they happen — but they NEVER wake you; you just see them next time you are ' +
+      'active. Default OFF, persisted across restarts. (Reactions also always ride ' +
+      'along on messages you fetch_history.) The channel must be subscribed for its ' +
+      'reactions to reach you.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        channelId: { type: 'string', description: PORTAL_CHANNEL_ID_DESC },
+        visible: { type: 'boolean', description: 'true = surface live reactions from this channel; false = stop.' },
+      },
+      required: ['channelId', 'visible'],
     },
   },
   {
