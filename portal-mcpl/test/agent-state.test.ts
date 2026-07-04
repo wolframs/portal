@@ -85,6 +85,23 @@ test('subscriptions survive serialize/restore', () => {
   assert.deepEqual(restored.subscriptionList().sort(), ['c1', 'c2']);
 });
 
+test('reaction visibility: opt-in toggles, dedupes, fires onChange, and persists', () => {
+  const s = new AgentState();
+  let changes = 0;
+  s.onChange(() => changes++);
+  assert.equal(s.isReactionVisible('c1'), false); // default off
+  assert.equal(s.setReactionVisibility('c1', true), true);
+  assert.equal(s.setReactionVisibility('c1', true), false); // dedupe → no change
+  assert.equal(s.isReactionVisible('c1'), true);
+  assert.equal(s.setReactionVisibility('c1', false), true);
+  assert.equal(s.isReactionVisible('c1'), false);
+  assert.equal(changes, 2); // on, off
+
+  s.setReactionVisibility('c2', true);
+  const restored = AgentState.fromJSON(JSON.parse(JSON.stringify(s.toJSON())));
+  assert.deepEqual(restored.reactionVisibilityList(), ['c2']);
+});
+
 test('drainUnread returns time-ordered unseen, then clears state', () => {
   const s = new AgentState();
   s.ingest(msg('m1', 'c1', '2026-01-01T00:00:01Z'), false, []);

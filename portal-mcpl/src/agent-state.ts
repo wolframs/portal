@@ -30,6 +30,8 @@ interface SerializedState {
   pings: PendingPing[];
   /** Channels this agent ambiently subscribes to (durable, survives restarts). */
   subscriptions?: string[];
+  /** Channels opted into live reaction visibility (durable, default off). */
+  reactionChannels?: string[];
 }
 
 const PREVIEW_LEN = 140;
@@ -44,6 +46,10 @@ export class AgentState {
   /** Channels this agent ambiently subscribes to. Durable agent state — the
    *  source of truth for what the relay session should be subscribed to. */
   private subscriptions = new Set<string>();
+  /** Channels opted into live reaction visibility (per-channel, default off).
+   *  Reactions from these channels surface in context but NEVER wake the agent
+   *  (tagged `chat:reaction`, which matches no wake policy). Durable. */
+  private reactionChannels = new Set<string>();
   private listeners: Array<() => void> = [];
 
   /** Notify on any persistence-relevant change (watermark / ping / subscription). */
@@ -96,6 +102,26 @@ export class AgentState {
 
   isSubscribed(channelId: string): boolean {
     return this.subscriptions.has(channelId);
+  }
+
+  // ── Reaction visibility (durable, per-channel opt-in; default off) ──
+
+  /** Opt a channel in/out of live reaction visibility. Returns true if changed. */
+  setReactionVisibility(channelId: string, visible: boolean): boolean {
+    const changed = visible ? !this.reactionChannels.has(channelId) : this.reactionChannels.has(channelId);
+    if (!changed) return false;
+    if (visible) this.reactionChannels.add(channelId);
+    else this.reactionChannels.delete(channelId);
+    this.emitChange();
+    return true;
+  }
+
+  isReactionVisible(channelId: string): boolean {
+    return this.reactionChannels.has(channelId);
+  }
+
+  reactionVisibilityList(): string[] {
+    return [...this.reactionChannels];
   }
 
   /** Advance the watermark for a channel (optionally only up to a message),
@@ -168,6 +194,7 @@ export class AgentState {
       watermarks: Object.fromEntries(this.watermarks),
       pings: this.pings,
       subscriptions: [...this.subscriptions],
+      reactionChannels: [...this.reactionChannels],
     };
   }
 
@@ -176,6 +203,7 @@ export class AgentState {
     s.watermarks = new Map(Object.entries(data.watermarks ?? {}));
     s.pings = data.pings ?? [];
     s.subscriptions = new Set(data.subscriptions ?? []);
+    s.reactionChannels = new Set(data.reactionChannels ?? []);
     return s;
   }
 }

@@ -15,6 +15,8 @@ import {
   type PortalChannel,
   type PortalEvent,
   type PortalMessage,
+  type PortalReaction,
+  type ReactionActor,
   type ReadyData,
   type RpcMethod,
   type RpcParams,
@@ -46,6 +48,21 @@ export interface PortalClientEvents extends Record<string, (...args: never[]) =>
   message: (e: MessageEvent) => void;
   messageUpdate: (e: MessageEvent) => void;
   messageDelete: (e: { channelId: string; threadId?: string; messageId: string }) => void;
+  /** A reaction was added to a message (native = human/bot; pseudo = a persona
+   *  reaction the relay tracks). */
+  reactionAdd: (e: {
+    channelId: string;
+    threadId?: string;
+    messageId: string;
+    reaction: PortalReaction;
+  }) => void;
+  reactionRemove: (e: {
+    channelId: string;
+    threadId?: string;
+    messageId: string;
+    emoji: string;
+    actor: ReactionActor;
+  }) => void;
   /** Any dispatch event, after the cache has been updated. */
   event: (e: PortalEvent) => void;
   channelChange: (channel: PortalChannel) => void;
@@ -136,8 +153,14 @@ export class PortalClient extends TypedEmitter<PortalClientEvents> {
   deleteMessage(messageId: string) {
     return this.call('delete_message', { messageId });
   }
-  react(messageId: string, emoji: string, visible = false) {
-    return this.call('react', { messageId, emoji, visible });
+  react(messageId: string, emoji: string, visible = false, native = false) {
+    return this.call('react', { messageId, emoji, visible, native });
+  }
+  unreact(messageId: string, emoji: string, native = false) {
+    return this.call('unreact', { messageId, emoji, native });
+  }
+  listEmojis(guildId?: string) {
+    return this.call('list_emojis', { guildId });
   }
   fetchHistory(params: RpcParams<'fetch_history'>) {
     return this.call('fetch_history', params);
@@ -235,6 +258,23 @@ export class PortalClient extends TypedEmitter<PortalClientEvents> {
         break;
       case 'message_delete':
         this.emit('messageDelete', { channelId: event.channelId, threadId: event.threadId, messageId: event.messageId });
+        break;
+      case 'reaction_add':
+        this.emit('reactionAdd', {
+          channelId: event.channelId,
+          threadId: event.threadId,
+          messageId: event.messageId,
+          reaction: event.reaction,
+        });
+        break;
+      case 'reaction_remove':
+        this.emit('reactionRemove', {
+          channelId: event.channelId,
+          threadId: event.threadId,
+          messageId: event.messageId,
+          emoji: event.emoji,
+          actor: event.actor,
+        });
         break;
       case 'channel_create':
       case 'channel_update':

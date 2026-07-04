@@ -1,4 +1,5 @@
 import type { PortalChannel, PortalGuild } from './channel.js';
+import type { PortalEmoji } from './emoji.js';
 import type { ChannelId, GuildId, PersonaId, RelayMessageId, RpcId, ThreadId, UserId } from './ids.js';
 import type { PortalMessage } from './message.js';
 import type { PortalMember, PortalRole } from './members.js';
@@ -57,7 +58,7 @@ export interface DeleteMessageParams {
 
 export interface ReactParams {
   messageId: RelayMessageId;
-  /** Unicode emoji or `name:id` for a custom emoji. */
+  /** Unicode emoji, `:name:`, `<:name:id>`, or `name:id` for a custom emoji. */
   emoji: string;
   /**
    * true  → also drop a visible persona webhook line so humans see the
@@ -66,11 +67,24 @@ export interface ReactParams {
    *         and a real UI still see it via reaction_add).
    */
   visible: boolean;
+  /**
+   * true → ALSO add a real (native) Discord reaction. Because a native reaction
+   *        belongs to a Discord *user*, it is attributed to the shared relay bot
+   *        (not the individual persona — all personas look identical when they
+   *        react natively). Combine with `visible` freely. Default false.
+   */
+  native?: boolean;
 }
 
 export interface UnreactParams {
   messageId: RelayMessageId;
   emoji: string;
+  /**
+   * true → also remove the shared bot's native reaction (mirrors
+   *        `react({ native: true })`). Removes the bot's single reaction, which
+   *        is shared across all personas. Default false.
+   */
+  native?: boolean;
 }
 
 export interface FetchHistoryParams {
@@ -161,6 +175,18 @@ export interface ListRolesResult {
   roles: PortalRole[];
 }
 
+export interface ListEmojisParams {
+  /** Limit to a single guild. Omit to list custom emojis across every guild the
+   *  relay is in. */
+  guildId?: GuildId;
+}
+export interface ListEmojisResult {
+  /** Custom (server) emojis, each with a message `token` and a `reactionArg`.
+   *  Empty when the relay holds no custom emojis (or lacks the
+   *  GuildEmojisAndStickers intent). */
+  emojis: PortalEmoji[];
+}
+
 // ── Pinned messages (RFC A4) ──
 
 export interface ListPinsParams {
@@ -215,6 +241,7 @@ export interface RpcMethods {
   list_members: { params: ListMembersParams; result: ListMembersResult };
   resolve_mentions: { params: ResolveMentionsParams; result: ResolveMentionsResult };
   list_roles: { params: ListRolesParams; result: ListRolesResult };
+  list_emojis: { params: ListEmojisParams; result: ListEmojisResult };
   list_pins: { params: ListPinsParams; result: ListPinsResult };
   claim_invite: { params: ClaimInviteParams; result: ClaimInviteResult };
   rotate_token: { params: RotateTokenParams; result: RotateTokenResult };

@@ -207,6 +207,19 @@ export class PortalMcplServer {
       if (e.addressedToMe) this.wokenPings.add(e.message.id); // live wake covers it
       this.pushMessage(e.message, e.addressedToMe, e.reasons);
     });
+    // Live reactions → context, NEVER a wake. Only *native* (human/bot)
+    // reactions are surfaced: the relay dispatches a persona's own *pseudo*
+    // reaction back only to that persona, so skipping pseudo avoids echoing the
+    // agent's own reactions. Per-channel opt-in (default off) via
+    // set_reaction_visibility. discord-mcpl parity.
+    this.client.on('reactionAdd', (e) => {
+      if (e.reaction.kind === 'pseudo') return;
+      this.pushReaction('add', e.channelId, e.messageId, e.reaction.emoji, e.reaction.by[0]?.name ?? 'someone');
+    });
+    this.client.on('reactionRemove', (e) => {
+      if (e.actor.kind === 'persona') return;
+      this.pushReaction('remove', e.channelId, e.messageId, e.emoji, e.actor.name);
+    });
     this.client.on('messageDelete', (e) => {
       if (!this.conn || !this.mcplEnabled) return;
       // Only surface deletions for channels the host actually has open — a delete
@@ -288,6 +301,46 @@ export class PortalMcplServer {
           .catch(() => {});
       }
     });
+  }
+
+  /**
+   * Surface a live reaction into the agent's context WITHOUT waking it. Gated by
+   * the per-channel opt-in (set_reaction_visibility, default off). The push
+   * carries the `chat:reaction` tag and an origin with NO wake flags
+   * (isMention/isExplicitMention/addressed absent) — the host's wake gate matches
+   * nothing, so the event is addMessage()'d into context but triggers no
+   * inference. Mirrors discord-mcpl's non-waking reaction path.
+   */
+  private pushReaction(
+    action: 'add' | 'remove',
+    channelId: string,
+    messageId: string,
+    emoji: string,
+    reactorName: string,
+  ): void {
+    if (!this.conn || !this.mcplEnabled) return;
+    if (!this.agent.state.isReactionVisible(channelId)) return;
+    const verb = action === 'add' ? 'reacted' : 'removed a reaction';
+    const shown = renderReactionEmoji(emoji);
+    const line = `[reaction] @${reactorName} ${verb} ${shown} on message ${messageId} in ${this.channelLabel(channelId)}`;
+    this.conn
+      .sendRequest(method.PUSH_EVENT, {
+        featureSet: 'portal.messaging',
+        eventId: `portal_reaction_${action}_${messageId}_${emoji}_${reactorName}_${this.eventSeq++}`,
+        timestamp: new Date().toISOString(),
+        // Deliberately NO wake flags on origin — reactions must never wake.
+        origin: {
+          source: 'portal',
+          channelId: portalChannelId(channelId),
+          messageId,
+          reactor: reactorName,
+          emoji: shown,
+          action,
+        },
+        tags: ['chat:reaction'], // matches no wake policy → shown, not woken
+        payload: { content: [textContent(line)] },
+      } satisfies PushEventParams)
+      .catch(() => {});
   }
 
   /** On (re)connect, wake once for pings the relay accrued while we were away.
@@ -467,6 +520,13 @@ function render(m: PortalMessage): string {
   const body = m.cleanContent || m.content || '';
   const atts = m.attachments.length ? ` [${m.attachments.length} attachment(s)]` : '';
   return `${who}: ${body}${atts}`;
+}
+
+/** Render a reaction emoji legibly: a custom `name:id` becomes `:name:`; unicode
+ *  passes through. (The relay encodes customs as `name:id` on the wire.) */
+function renderReactionEmoji(emoji: string): string {
+  const m = /^(\w+):\d+$/.exec(emoji);
+  return m ? `:${m[1]}:` : emoji;
 }
 
 function stringify(v: unknown): string {

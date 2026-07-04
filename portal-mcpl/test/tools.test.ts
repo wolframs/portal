@@ -31,3 +31,19 @@ test('mark_read accepts optional uptoCreatedAt', () => {
   const props = byName.get('mark_read')!.inputSchema.properties;
   assert.ok('uptoCreatedAt' in props);
 });
+
+test('reaction + emoji tools are exposed', () => {
+  for (const name of ['react', 'unreact', 'list_emojis', 'set_reaction_visibility']) {
+    assert.ok(byName.has(name), `missing tool ${name}`);
+  }
+});
+
+test('react exposes both visible and native flags', () => {
+  const props = byName.get('react')!.inputSchema.properties;
+  assert.ok('visible' in props && 'native' in props);
+});
+
+test('set_reaction_visibility requires channelId + visible', () => {
+  const t = byName.get('set_reaction_visibility')!;
+  assert.deepEqual(t.inputSchema.required, ['channelId', 'visible']);
+});

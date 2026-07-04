@@ -470,7 +470,7 @@ export class Relay implements GatewayHooks {
       }
       case 'react': {
         const p = params as RpcParams<'react'>;
-        return this.react(personaId, p.messageId, p.emoji, p.visible);
+        return this.react(personaId, p.messageId, p.emoji, p.visible, p.native ?? false);
       }
       case 'unreact': {
         const p = params as RpcParams<'unreact'>;
@@ -484,6 +484,15 @@ export class Relay implements GatewayHooks {
             emoji: p.emoji,
             actor: { kind: 'persona', id: personaId, name: this.displayName(personaId) },
           });
+          // Optionally drop the shared bot's native reaction (best-effort — the
+          // structured pseudo-remove above is authoritative for agents/UI).
+          if (p.native) {
+            try {
+              await this.bot.removeReaction(ref.threadId ?? ref.channelId, ref.discordMsgId, p.emoji);
+            } catch (err) {
+              console.error('[portal-relay] native unreact failed:', (err as Error).message);
+            }
+          }
         }
         return {};
       }
@@ -557,6 +566,19 @@ export class Relay implements GatewayHooks {
       case 'list_roles': {
         const p = params as RpcParams<'list_roles'>;
         return { roles: this.bot.listRoles(p.guildId, this.config.rolePool.prefix) };
+      }
+      case 'list_emojis': {
+        const p = params as RpcParams<'list_emojis'>;
+        const emojis = (await this.bot.listEmojis(p.guildId)).map((e) => ({
+          id: e.id,
+          name: e.name,
+          animated: e.animated,
+          guildId: e.guildId,
+          guildName: e.guildName,
+          token: `<${e.animated ? 'a' : ''}:${e.name}:${e.id}>`,
+          reactionArg: `:${e.name}:`,
+        }));
+        return { emojis };
       }
       case 'list_pins': {
         const p = params as RpcParams<'list_pins'>;
@@ -672,6 +694,7 @@ export class Relay implements GatewayHooks {
     relayMsgId: string,
     emoji: string,
     visible: boolean,
+    native: boolean,
   ): Promise<Record<string, never>> {
     const ref = await this.resolveRef(relayMsgId);
     if (!ref) throw rpcError('NOT_FOUND', 'unknown message');
@@ -689,6 +712,16 @@ export class Relay implements GatewayHooks {
         by: [{ kind: 'persona', id: personaId, name: this.displayName(personaId) }],
       },
     });
+    // Optionally add a real Discord reaction (attributed to the shared bot).
+    // Best-effort: the structured pseudo-reaction above is authoritative for
+    // agents/UI, so a Discord failure here must not drop it.
+    if (native) {
+      try {
+        await this.bot.addReaction(ref.threadId ?? ref.channelId, ref.discordMsgId, emoji);
+      } catch (err) {
+        console.error('[portal-relay] native react failed:', (err as Error).message);
+      }
+    }
     // Optionally make it visible to humans in Discord.
     if (visible) {
       const cfg = this.identity.get(personaId)!;
@@ -944,7 +977,10 @@ export class Relay implements GatewayHooks {
       guildId: inc.guildId,
       author,
       content: inc.content,
-      cleanContent: inc.cleanContent,
+      // Render custom-emoji tokens (<:name:id> / <a:name:id>) down to :name: in
+      // the human-readable field so message text reads legibly for the model.
+      // The raw `content` keeps the full tokens for correlation/round-tripping.
+      cleanContent: renderCustomEmojis(inc.cleanContent),
       attachments: inc.attachments,
       mentions: {
         personas,
@@ -1020,4 +1056,10 @@ export class Relay implements GatewayHooks {
 
 function rpcError(code: string, message: string): Error & { code: string } {
   return Object.assign(new Error(message), { code });
+}
+
+/** Render custom-emoji tokens ('<:name:id>' / '<a:name:id>') down to ':name:'
+ *  so message text reads legibly for the model. Unicode emoji are untouched. */
+function renderCustomEmojis(text: string): string {
+  return text.replace(/<a?:(\w+):\d+>/g, (_full, name: string) => `:${name}:`);
 }

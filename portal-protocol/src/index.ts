@@ -15,6 +15,7 @@ export * from './version.js';
 export * from './ids.js';
 export * from './persona.js';
 export * from './channel.js';
+export * from './emoji.js';
 export * from './message.js';
 export * from './members.js';
 export * from './events.js';

@@ -116,7 +116,14 @@ export class PortalAgent {
       case 'delete_message':
         return this.client.deleteMessage(str(args.messageId));
       case 'react':
-        return this.client.react(str(args.messageId), str(args.emoji), Boolean(args.visible));
+        return this.client.react(
+          str(args.messageId),
+          str(args.emoji),
+          Boolean(args.visible),
+          Boolean(args.native),
+        );
+      case 'unreact':
+        return this.client.unreact(str(args.messageId), str(args.emoji), Boolean(args.native));
       case 'fetch_history':
         return this.client.fetchHistory({
           channelId: str(args.channelId),
@@ -167,6 +174,18 @@ export class PortalAgent {
         });
       case 'list_roles':
         return this.client.call('list_roles', { guildId: str(args.guildId) });
+      case 'list_emojis':
+        return this.client.call('list_emojis', { guildId: optStr(args.guildId) });
+      case 'set_reaction_visibility': {
+        const channelId = str(args.channelId);
+        const visible = Boolean(args.visible);
+        // Durable per-channel opt-in; persisted via onChange. Reactions are shown
+        // in context but NEVER wake the agent (see server.ts push path).
+        this.state.setReactionVisibility(channelId, visible);
+        return visible
+          ? `Reaction visibility ON for ${channelId}. Reactions there now appear in your context as they happen (they never wake you). Subscribe to the channel if you aren't already, so its reactions reach you.`
+          : `Reaction visibility OFF for ${channelId}.`;
+      }
       case 'list_pins':
         return this.client.call('list_pins', { channelId: str(args.channelId) });
       case 'get_pending_pings':

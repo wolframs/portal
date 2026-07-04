@@ -108,6 +108,15 @@ export interface MemberInfo {
   roles: string[];
 }
 
+/** A custom (server) emoji from the bot's guild cache. */
+export interface EmojiInfo {
+  id: string;
+  name: string;
+  animated: boolean;
+  guildId: string;
+  guildName: string | null;
+}
+
 type Handlers = {
   ready?: () => void;
   message?: (m: IncomingMessage) => void;
@@ -155,6 +164,9 @@ export class DiscordBot implements WebhookOps, RoleOps {
       GatewayIntentBits.MessageContent,
       GatewayIntentBits.GuildMessageReactions,
       GatewayIntentBits.GuildWebhooks,
+      // Non-privileged. Populates guild.emojis for list_emojis and keeps the
+      // custom-emoji cache fresh (emojiCreate/Update/Delete).
+      GatewayIntentBits.GuildEmojisAndStickers,
     ];
     if (this.guildMembersIntent) intents.push(GatewayIntentBits.GuildMembers);
     this.client = new Client({
@@ -305,7 +317,45 @@ export class DiscordBot implements WebhookOps, RoleOps {
     const channel = await this.client.channels.fetch(channelId);
     if (!channel || !('messages' in channel)) throw new Error(`Channel ${channelId} not found`);
     const msg = await (channel as TextChannel).messages.fetch(messageId);
-    await msg.react(emoji);
+    await msg.react(this.resolveReactionEmoji(emoji, msg.guild));
+  }
+
+  /** Remove the shared bot's OWN native reaction from a message. (A native
+   *  reaction belongs to the bot user; there is one per emoji regardless of how
+   *  many personas "reacted", so this removes it for all of them.) No-op if the
+   *  bot has no such reaction. */
+  async removeReaction(channelId: string, messageId: string, emoji: string): Promise<void> {
+    const channel = await this.client.channels.fetch(channelId);
+    if (!channel || !('messages' in channel)) throw new Error(`Channel ${channelId} not found`);
+    const msg = await (channel as TextChannel).messages.fetch(messageId);
+    const resolved = this.resolveReactionEmoji(emoji, msg.guild);
+    const selfId = this.client.user?.id;
+    if (!selfId) return;
+    // Match the reaction bucket by resolved identifier (custom) or unicode name.
+    const reaction = msg.reactions.cache.find((r) => {
+      const id = r.emoji.id ? `${r.emoji.name}:${r.emoji.id}` : (r.emoji.name ?? '');
+      return id === resolved || r.emoji.name === resolved;
+    });
+    if (reaction) await reaction.users.remove(selfId).catch(() => {});
+  }
+
+  /** Turn a caller-supplied emoji into something discord.js `.react()` accepts.
+   *  Unicode chars and the full custom forms ('<:name:id>', 'name:id') pass
+   *  through untouched; a bare ':name:' or 'name' is resolved to a cached custom
+   *  emoji's 'name:id' identifier (a bare name is not resolvable by discord.js).
+   *  Falls back to the input unchanged (treated as unicode) when nothing
+   *  matches. Mirrors discord-mcpl's resolver. */
+  private resolveReactionEmoji(emoji: string, guild: Guild | null): string {
+    const trimmed = emoji.trim();
+    if (/^<a?:\w+:\d+>$/.test(trimmed) || /^\w+:\d+$/.test(trimmed)) return trimmed;
+    const bare = trimmed.replace(/^:+|:+$/g, '');
+    if (/^\w{2,}$/.test(bare)) {
+      const found =
+        guild?.emojis.cache.find((e) => e.name === bare) ??
+        this.client.emojis.cache.find((e) => e.name === bare);
+      if (found) return found.identifier;
+    }
+    return trimmed;
   }
 
   // ── Queries ──
@@ -359,6 +409,31 @@ export class DiscordBot implements WebhookOps, RoleOps {
       name: r.name,
       pooled: r.name.startsWith(poolPrefix),
     }));
+  }
+
+  /** The custom (server) emojis the bot can see — the shared palette for both
+   *  message content and reactions. Omit `guildId` to span all allowed guilds.
+   *  Reads the warm gateway cache (GuildEmojisAndStickers intent); best-effort
+   *  fetch when a guild's cache is cold. */
+  async listEmojis(guildId?: string): Promise<EmojiInfo[]> {
+    const guilds: Guild[] = [];
+    if (guildId) {
+      if (!this.guildAllowed(guildId)) return [];
+      const g = this.client.guilds.cache.get(guildId) ?? (await this.client.guilds.fetch(guildId).catch(() => null));
+      if (g) guilds.push(g);
+    } else {
+      guilds.push(...[...this.client.guilds.cache.values()].filter((g) => this.guildAllowed(g.id)));
+    }
+    const out: EmojiInfo[] = [];
+    for (const g of guilds) {
+      let emojis = g.emojis.cache;
+      if (emojis.size === 0) emojis = await g.emojis.fetch().catch(() => emojis);
+      for (const e of emojis.values()) {
+        if (!e.name) continue;
+        out.push({ id: e.id, name: e.name, animated: e.animated ?? false, guildId: g.id, guildName: g.name });
+      }
+    }
+    return out;
   }
 
   /** Channel ids the given Discord role can VIEW (RFC-004 mirrorRole scope).
