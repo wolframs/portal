@@ -22,6 +22,7 @@ Discord ⇄ portal-relay ⇄(WS: portal-protocol)⇄ portal-client ⇄ portal-mc
 | `portal-relay` | The one bot: webhook pool, role pool, permissions, durable message store, WS gateway, self-registration. |
 | `portal-client` | Transport + cache + typed RPC + reconnect/resume + self-enroll. |
 | `portal-mcpl` | Agent state (watermarks, pending pings) + MCPL tool surface + MCPL server for connectome-host + Claude Code channel server (`cc-cli`). |
+| `portal-chatbot` | Generic chat persona backed by any OpenRouter model: self-enrolls from an invite, replies to @-mentions/replies with channel history as context. |
 
 > `mcpl-harness` (a stateful CLI/web MCPL host used to drive these servers in
 > testing) is a separate project, not part of this repo.

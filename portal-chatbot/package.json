@@ -1,0 +1,16 @@
+{
+  "name": "@animalabs/portal-chatbot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Generic Portal chat persona backed by any OpenRouter model: @-mention it and it replies with recent channel history as context. No Discord bot token, no integration slot — self-enrolls from a Portal invite.",
+  "bin": {
+    "portal-chatbot": "./src/index.mjs"
+  },
+  "scripts": {
+    "start": "node ./src/index.mjs"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
