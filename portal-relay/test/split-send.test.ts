@@ -59,6 +59,35 @@ test('sendMany keeps parts contiguous against concurrent sends', async () => {
   assert.equal(order[i1 + 1], 'a2');
 });
 
+test('sendMany fires onSent per part, in order, as each part posts', async () => {
+  const { ops } = fakeOps();
+  const pool = new WebhookPool(ops, 1);
+  const base = { username: 'u', avatarURL: '' };
+  const seen: Array<[number, string, string]> = [];
+  await pool.sendMany(
+    'chan', 'p1',
+    [{ ...base, content: 'one' }, { ...base, content: 'two' }],
+    (i, id, wh) => seen.push([i, id, wh]),
+  );
+  assert.deepEqual(seen, [[0, 'm1', 'wh1'], [1, 'm2', 'wh1']]);
+});
+
+test('sendMany fires onSent only for parts that landed before a failure', async () => {
+  const { ops } = fakeOps(1); // second send fails
+  const pool = new WebhookPool(ops, 1);
+  const base = { username: 'u', avatarURL: '' };
+  const seen: string[] = [];
+  await assert.rejects(
+    pool.sendMany(
+      'chan', 'p1',
+      [{ ...base, content: 'one' }, { ...base, content: 'two' }],
+      (_i, id) => seen.push(id),
+    ),
+    PartialSendError,
+  );
+  assert.deepEqual(seen, ['m1']);
+});
+
 test('sendMany surfaces a PartialSendError carrying the ids that DID send', async () => {
   const { ops } = fakeOps(1); // second send fails
   const pool = new WebhookPool(ops, 1);

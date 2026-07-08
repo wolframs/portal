@@ -117,23 +117,30 @@ export class WebhookPool {
 
   /** Send several messages as ONE queue item on the persona's webhook, so the
    *  parts of a split send stay contiguous (no same-webhook send can land
-   *  between them). On a mid-sequence failure, rejects with a `PartialSendError`
-   *  carrying the ids that DID go out so the caller can still record them. */
+   *  between them). `onSent` fires per part the moment it is posted — before the
+   *  batch resolves — so the caller can record attribution while later parts are
+   *  still in flight (the part's gateway echo races the batch). On a
+   *  mid-sequence failure, rejects with a `PartialSendError` carrying the ids
+   *  that DID go out so the caller can still record them. */
   async sendMany(
     parentChannelId: string,
     personaId: string,
     optsList: WebhookSendOpts[],
+    onSent?: (index: number, messageId: string, webhookId: string) => void,
   ): Promise<{ messageIds: string[]; webhookId: string }> {
     const pool = await this.ensurePool(parentChannelId);
     const webhookId = this.pick(pool, personaId);
     const task = async (): Promise<string[]> => {
       const ids: string[] = [];
-      for (const opts of optsList) {
+      for (let i = 0; i < optsList.length; i++) {
+        let messageId: string;
         try {
-          ids.push((await this.ops.sendWebhook(webhookId, opts)).messageId);
+          messageId = (await this.ops.sendWebhook(webhookId, optsList[i])).messageId;
         } catch (err) {
           throw new PartialSendError(ids, webhookId, err as Error);
         }
+        ids.push(messageId);
+        onSent?.(i, messageId, webhookId);
       }
       return ids;
     };

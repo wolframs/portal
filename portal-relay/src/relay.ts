@@ -38,6 +38,11 @@ import { AuditLog } from './admin/audit.js';
 /** Discord's hard per-message content limit. */
 const DISCORD_MSG_LIMIT = 2000;
 
+/** How long to hold an own-webhook send echo waiting for the RPC to record its
+ *  attribution before dispatching it anyway (safety net; normally flushed in
+ *  milliseconds). Generous enough to ride out a slow multi-part send. */
+const ECHO_HOLD_MS = 5000;
+
 export class Relay implements GatewayHooks {
   private bot: DiscordBot;
   readonly identity: IdentityStore;
@@ -52,6 +57,9 @@ export class Relay implements GatewayHooks {
   private history: HistoryCache;
   private gateway: Gateway;
   private mirror: MirrorCache;
+  /** Own-webhook send echoes held until their RPC records attribution (the
+   *  gateway event can beat the REST response). See onDiscordMessage. */
+  private pendingEchoes = new Map<string, { inc: IncomingMessage; timer: NodeJS.Timeout }>();
   private admin?: AdminServer;
   /** Shared audit log (RFC-005). Present only when the admin panel is enabled;
    *  self-service ops (claim_invite / rotate_token) audit here too. */
@@ -168,6 +176,8 @@ export class Relay implements GatewayHooks {
   }
 
   async stop(): Promise<void> {
+    for (const held of this.pendingEchoes.values()) clearTimeout(held.timer);
+    this.pendingEchoes.clear();
     this.identity.stopWatching();
     this.permissions.stopWatching();
     this.invites?.stopWatching();
@@ -767,6 +777,7 @@ export class Relay implements GatewayHooks {
         personaId,
         webhookId,
       });
+      this.flushEcho(messageId);
       return { messageId: ref.relayId };
     }
 
@@ -778,48 +789,49 @@ export class Relay implements GatewayHooks {
       content: c.text,
       files: i === chunks.length - 1 ? p.files : undefined,
     }));
+    // Record each part the moment it is posted (not after the whole batch):
+    // a part's gateway echo arrives while later parts are still sending, and
+    // it must already find the bridge metadata and attribution.
+    const partIds: string[] = [];
+    const refs: MessageRef[] = [];
+    const onSent = (i: number, discordMsgId: string, webhookId: string): void => {
+      partIds.push(discordMsgId);
+      refs.push(
+        this.store.record({
+          channelId: target.parentChannelId,
+          threadId: target.threadId,
+          guildId,
+          discordMsgId,
+          personaId,
+          webhookId,
+          bridgeOpen: chunks[i].bridgeOpen,
+          bridgeClose: chunks[i].bridgeClose,
+          partOf: i > 0 ? partIds[0] : undefined,
+        }),
+      );
+      this.flushEcho(discordMsgId);
+    };
     let sent: { messageIds: string[]; webhookId: string };
     try {
-      sent = await this.webhooks.sendMany(target.parentChannelId, personaId, optsList);
+      sent = await this.webhooks.sendMany(target.parentChannelId, personaId, optsList, onSent);
     } catch (err) {
-      // Record whatever DID land so the parts stay attributable/editable, and
+      // Parts that DID land are already recorded by onSent; stamp the (partial)
+      // part-set on the first so edit/delete still cover the whole set, and
       // name them in the error so the caller can clean up or continue.
       if (err instanceof PartialSendError && err.sentIds.length) {
-        const partial = this.recordParts(target, guildId, personaId, err.webhookId, err.sentIds, chunks);
+        this.store.setSplitMeta(err.sentIds[0], splitMetaFor(err.sentIds, 0, chunks));
         throw rpcError(
           'DISCORD_ERROR',
           `split send failed after ${err.sentIds.length}/${chunks.length} parts ` +
-            `(${err.reason.message}); posted parts: ${partial.map((r) => r.relayId).join(', ')} ` +
+            `(${err.reason.message}); posted parts: ${refs.map((r) => r.relayId).join(', ')} ` +
             `— delete them before retrying, or send the remainder separately`,
         );
       }
       throw rpcError('DISCORD_ERROR', `split send failed: ${(err as Error).message}`);
     }
-    const refs = this.recordParts(target, guildId, personaId, sent.webhookId, sent.messageIds, chunks);
+    // The full part list is only known now — stamp it on the first part.
+    this.store.setSplitMeta(sent.messageIds[0], splitMetaFor(sent.messageIds, 0, chunks));
     return { messageId: refs[0].relayId, messageIds: refs.map((r) => r.relayId) };
-  }
-
-  /** Record every part of a split send: bridge strings for later stripping,
-   *  `parts` on the first part, `partOf` back-links on continuations. */
-  private recordParts(
-    target: { parentChannelId: string; threadId?: string },
-    guildId: string | null,
-    personaId: string,
-    webhookId: string,
-    discordMsgIds: string[],
-    chunks: ChunkPiece[],
-  ): MessageRef[] {
-    return discordMsgIds.map((discordMsgId, i) =>
-      this.store.record({
-        channelId: target.parentChannelId,
-        threadId: target.threadId,
-        guildId,
-        discordMsgId,
-        personaId,
-        webhookId,
-        ...splitMetaFor(discordMsgIds, i, chunks),
-      }),
-    );
   }
 
   /** The first part of a split send (edits/deletes operate on the whole set).
@@ -858,7 +870,9 @@ export class Relay implements GatewayHooks {
     for (const id of partIds.slice(chunks.length)) {
       try {
         await this.webhooks.delete(webhookId, id, primary.threadId);
-        this.store.remove(id);
+        // Store cleanup is left to the gateway's delete echo (onDiscordDelete),
+        // exactly like delete_message — removing the ref here would strip that
+        // echo of its relay id and channel attribution.
       } catch (err) {
         // Keep the ref — the message is still live in Discord; dropping the
         // store row would orphan it beyond any future edit/delete.
@@ -933,8 +947,36 @@ export class Relay implements GatewayHooks {
       }));
     }
     this.history.invalidate(inc.channelId); // new message changes the latest page
+    // Our own webhook's create echo can beat the sending RPC's store.record
+    // (gateway push vs REST response race — near-certain for split sends, where
+    // part 1's echo lands while later parts are still posting). Dispatching now
+    // would leak unstripped bridge markers and misattribute the author, so hold
+    // the echo; the send path flushes it the moment attribution is recorded.
+    // The timer is a safety net for webhook messages that never get recorded.
+    if (inc.webhookId && this.bot.ownsWebhook(inc.webhookId) && !this.store.getByDiscordId(inc.id)) {
+      const timer = setTimeout(() => {
+        this.pendingEchoes.delete(inc.id);
+        this.dispatchDiscordMessage(inc);
+      }, ECHO_HOLD_MS);
+      this.pendingEchoes.set(inc.id, { inc, timer });
+      return;
+    }
+    this.dispatchDiscordMessage(inc);
+  }
+
+  private dispatchDiscordMessage(inc: IncomingMessage): void {
+    this.history.invalidate(inc.channelId); // new message changes the latest page
     const { message, authorPersonaId } = this.buildPortalMessage(inc);
     this.deliverMessage('message_create', message, authorPersonaId);
+  }
+
+  /** Release a held own-send echo now that its attribution is recorded. */
+  private flushEcho(discordMsgId: string): void {
+    const held = this.pendingEchoes.get(discordMsgId);
+    if (!held) return;
+    clearTimeout(held.timer);
+    this.pendingEchoes.delete(discordMsgId);
+    this.dispatchDiscordMessage(held.inc);
   }
 
   /** Inbound (human/bot) edit → message_update to interested personas. */

@@ -42,6 +42,16 @@ so a code fence or emphasis straddling a boundary breaks everything after it.
   fetch_history, pins) removes the synthetic markers, so agents always see
   their original unbroken markdown. A fence reopener whose info string Discord
   rewrote (mentions in `cleanContent`) is matched on the fence marker run alone.
+- **Echo/record race** (found in live verification): the gateway's create echo
+  for our own webhook message can beat the sending RPC's `store.record` — for
+  split sends it's near-certain (part 1's echo lands while later parts are
+  still posting), which would dispatch live events unstripped and without
+  `partOf`. Two-sided fix: `sendMany` fires an `onSent` callback per part so
+  the relay records each part the moment it exists, and `onDiscordMessage`
+  HOLDS an own-webhook echo with no store ref until the send path records and
+  flushes it (`flushEcho`; 5 s timer as safety net). Symmetrically, surplus
+  parts deleted by an edit leave store cleanup to the gateway's delete echo
+  (like `delete_message`), so the `message_delete` event keeps its relay id.
 - **Edit** (`edit_message`): redirected to the first part; new content is
   re-split and written across the existing parts; surplus parts are deleted;
   bridge metadata is rewritten (`setSplitMeta`). Needing MORE parts than the
@@ -54,7 +64,12 @@ so a code fence or emphasis straddling a boundary breaks everything after it.
 
 **Verified:** `portal-relay/test/discord-markdown.test.ts` (140 tests, ported
 from chapterx) and `test/split-send.test.ts` (sendMany ordering/contiguity/
-partial failure, store round-trip, stripBridges, split→strip reassembly).
+partial failure, onSent per-part callback, store round-trip, stripBridges,
+split→strip reassembly). **Live-verified** (2026-07-08) against a real guild
+with `scripts/rfc6-live.mjs` — 21/21 checks: 4-part split send, stripped live
+events + history + reassembly, `partOf` back-links, shrink edit, collapse with
+surplus deletion, grow-edit refusal, delete fan-out, audio attachment CDN
+round-trip, native 🐘 reaction.
 
 ## 2. Inline audio for agents (mcpl) + protocol audio metadata
 
