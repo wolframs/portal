@@ -157,8 +157,8 @@ async function boot() {
 
   $('#user-name').textContent = (me.user && me.user.name) || 'admin';
   $('#super-badge').classList.toggle('hidden', !me.isSuper);
-  // Identities tab is super-admin only.
-  $('.tab-super').classList.toggle('hidden', !me.isSuper);
+  // Super-admin-only tabs (Identities, Guilds).
+  for (const t of document.querySelectorAll('.tab-super')) t.classList.toggle('hidden', !me.isSuper);
 
   // Scope the switcher to guilds the bot is actually in (named) — not every
   // guild the admin owns on Discord — so it lands where data exists.
@@ -200,23 +200,38 @@ function setupScope(me, guilds) {
   if (!guilds.length && !me.isSuper) sel.appendChild(el('option', { value: '', text: 'no manageable guilds' }));
   for (const g of guilds) sel.appendChild(el('option', { value: g.id, text: g.name || g.id }));
   if (me.isSuper) sel.appendChild(el('option', { value: '__custom__', text: 'other guild id…' }));
-  state.guildId = guilds.length ? guilds[0].id : null;
+  // Preserve the current selection across repopulation (e.g. allow-list edits).
+  state.guildId = guilds.some((g) => g.id === state.guildId)
+    ? state.guildId
+    : guilds.length ? guilds[0].id : null;
   sel.value = state.guildId || (me.isSuper ? '__custom__' : '');
-  sel.addEventListener('change', (e) => {
-    let v = e.target.value;
-    if (v === '__custom__') {
-      v = (prompt('Enter the Discord guild id to manage:') || '').trim();
-      if (!v) { e.target.value = state.guildId || ''; return; }
-      // Keep a synthetic option so the chosen id stays selected.
-      if (!Array.from(sel.options).some((o) => o.value === v)) {
-        sel.insertBefore(el('option', { value: v, text: v }), sel.lastChild);
+  if (!setupScope._bound) {
+    setupScope._bound = true;
+    sel.addEventListener('change', (e) => {
+      let v = e.target.value;
+      if (v === '__custom__') {
+        v = (prompt('Enter the Discord guild id to manage:') || '').trim();
+        if (!v) { e.target.value = state.guildId || ''; return; }
+        // Keep a synthetic option so the chosen id stays selected.
+        if (!Array.from(sel.options).some((o) => o.value === v)) {
+          sel.insertBefore(el('option', { value: v, text: v }), sel.lastChild);
+        }
+        sel.value = v;
       }
-      sel.value = v;
-    }
-    state.guildId = v;
-    state.q = ''; state.offset = 0;
-    render();
-  });
+      state.guildId = v;
+      state.q = ''; state.offset = 0;
+      render();
+    });
+  }
+}
+
+/** Re-fetch the manageable-guild list and rebuild the scope switcher (used
+ *  after allow-list edits so new guilds appear without a re-login). */
+async function refreshScope() {
+  let guilds = [];
+  try { guilds = (await api('GET', '/admin/guilds')).guilds || []; }
+  catch { guilds = (state.me && state.me.guilds) || []; }
+  setupScope(state.me, guilds);
 }
 
 async function logout() {
@@ -271,6 +286,7 @@ async function render() {
     else if (state.tab === 'roles') await renderRoles(view);
     else if (state.tab === 'audit') await renderAudit(view);
     else if (state.tab === 'identities') await renderIdentities(view);
+    else if (state.tab === 'guilds') await renderGuilds(view);
   } catch (e) {
     clear(view);
     if (e.status === 403) view.appendChild(el('div', { class: 'banner err', text: e.message || 'Not permitted in this guild.' }));
@@ -622,6 +638,99 @@ async function deleteRole(name) {
   if (!confirm('Delete access role "' + name + '"? Assignees lose those caps on their next action.')) return;
   try { await api('DELETE', '/admin/roles/' + encodeURIComponent(name)); banner('Role deleted'); invalidateGuildMeta(); render(); }
   catch (e) { banner('Delete failed: ' + e.message, 'err'); }
+}
+
+// ── Guilds (super-admin, GLOBAL): the relay's guild allow-list ────────────────
+
+async function renderGuilds(view) {
+  const data = await api('GET', '/admin/guilds/all');
+  clear(view);
+
+  const allowed = (data.guilds || []).filter((g) => g.allowed);
+  const candidates = (data.guilds || []).filter((g) => !g.allowed);
+
+  if (!data.editable) {
+    view.appendChild(el('div', { class: 'banner', text:
+      'Read-only: the allow-list is env-managed (DISCORD_GUILD_ID). Set PORTAL_GUILDS on the relay to edit it here.' }));
+    if ((data.allowlist || []).length === 0) {
+      view.appendChild(el('p', { class: 'hint muted', text:
+        'No restriction configured — ALL joined guilds are relayed.' }));
+    }
+  } else if ((data.allowlist || []).length === 0) {
+    view.appendChild(el('div', { class: 'banner err', text:
+      'Allow-list is EMPTY — the relay is ignoring every guild (deny-all).' }));
+  }
+
+  if (data.editable) {
+    const input = el('input', { class: 'search', type: 'text', placeholder: 'guild id to allow…' });
+    const add = el('button', { class: 'btn btn-sm btn-primary', text: 'Allow id' });
+    add.addEventListener('click', () => allowGuild(input.value.trim()));
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') allowGuild(input.value.trim()); });
+    view.appendChild(el('div', { class: 'toolbar' }, [input, el('div', { class: 'toolbar-actions' }, [add])]));
+  }
+
+  const rows = allowed.map((g) => {
+    const cells = [
+      el('td', {}, g.present === false
+        ? [el('span', { class: 'muted', text: '(unknown)' }), ' ', el('span', { class: 'badge badge-warn', text: 'not joined' })]
+        : [g.name || g.id]),
+      el('td', {}, [el('code', { text: g.id })]),
+      el('td', { class: 'col-narrow', text: g.memberCount != null ? String(g.memberCount) : '—' }),
+    ];
+    if (data.editable) {
+      cells.push(el('td', { class: 'col-narrow' }, [
+        el('button', { class: 'btn btn-sm btn-danger', text: 'Remove', onclick: () => disallowGuild(g, allowed.length) }),
+      ]));
+    }
+    return el('tr', {}, cells);
+  });
+  const headers = [{ label: 'Allowed guild' }, { label: 'Id' }, { label: 'Members', cls: 'col-narrow' }];
+  if (data.editable) headers.push({ label: '', cls: 'col-narrow' });
+  view.appendChild(table(headers, rows));
+
+  if (candidates.length) {
+    view.appendChild(el('h3', { class: 'muted', text: 'Bot is in these guilds, but they are not allowed' }));
+    view.appendChild(table(
+      [{ label: 'Guild' }, { label: 'Id' }, { label: 'Members', cls: 'col-narrow' },
+       ...(data.editable ? [{ label: '', cls: 'col-narrow' }] : [])],
+      candidates.map((g) => el('tr', {}, [
+        el('td', { text: g.name || g.id }),
+        el('td', {}, [el('code', { text: g.id })]),
+        el('td', { class: 'col-narrow', text: g.memberCount != null ? String(g.memberCount) : '—' }),
+        ...(data.editable
+          ? [el('td', { class: 'col-narrow' }, [el('button', { class: 'btn btn-sm btn-primary', text: 'Allow', onclick: () => allowGuild(g.id) })])]
+          : []),
+      ])),
+    ));
+  }
+
+  view.appendChild(el('p', { class: 'hint muted', text:
+    'The allow-list controls which Discord guilds the relay serves at all (events, history, sending). ' +
+    'Changes apply immediately — no relay restart, no Discord reconnect. Edits are audited.' }));
+}
+
+async function allowGuild(gid) {
+  if (!gid) return;
+  if (!/^\d{5,25}$/.test(gid)) return banner('Not a Discord guild id (snowflake).', 'err');
+  try {
+    const r = await api('POST', '/admin/guilds', { guildId: gid });
+    banner(r.warning ? 'Allowed (dormant): ' + r.warning : 'Guild allowed');
+    await refreshScope();
+    render();
+  } catch (e) { banner('Allow failed: ' + e.message, 'err'); }
+}
+
+async function disallowGuild(g, allowedCount) {
+  const name = g.name || g.id;
+  let msg = 'Remove "' + name + '" from the allow-list? The relay stops serving it immediately.';
+  if (allowedCount === 1) msg += '\n\nThis is the LAST allowed guild — the relay will deny ALL guilds.';
+  if (!confirm(msg)) return;
+  try {
+    const r = await api('DELETE', '/admin/guilds/' + encodeURIComponent(g.id));
+    banner(r.denyAll ? 'Guild removed — allow-list now EMPTY (deny-all)' : 'Guild removed', r.denyAll ? 'err' : undefined);
+    await refreshScope();
+    render();
+  } catch (e) { banner('Remove failed: ' + e.message, 'err'); }
 }
 
 // ── Audit (guild-scoped) ───────────────────────────────────────────────────────
