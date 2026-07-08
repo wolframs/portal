@@ -65,6 +65,7 @@ function makeRelay() {
     }),
     meIn: () => ({}),
     listGuilds: () => [{ id: GUILD, name: 'G', memberCount: 1 }],
+    isGuildAllowed: () => true,
   };
 
   // Fake gateway: captures dispatch and lets the test drive subscription state.

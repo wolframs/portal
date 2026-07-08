@@ -14,7 +14,13 @@
  *   PORTAL_WS_PORT          WS gateway port (default 8790, bound to 127.0.0.1).
  *   PORTAL_WEBHOOK_POOL     Webhooks per hot channel (default 1).
  *   PORTAL_HEARTBEAT_MS     Heartbeat interval (default 30000).
- *   DISCORD_GUILD_ID        Optional comma-separated guild allow-list.
+ *   DISCORD_GUILD_ID        Optional comma-separated guild allow-list. With
+ *                           PORTAL_GUILDS set it is only the first-run seed.
+ *   PORTAL_GUILDS           Optional path to a persisted guild allow-list JSON
+ *                           ({"guildIds":[...]}). Enables runtime editing via the
+ *                           admin panel (super-admin only). Seeded from
+ *                           DISCORD_GUILD_ID when the file doesn't exist. When
+ *                           active, an EMPTY list denies all guilds (fail closed).
  *   PORTAL_READSTATE        Optional path to persist per-persona read-state
  *                           (watermarks, pending pings, ambient tallies). Enables
  *                           offline catch-up surviving restarts. Tune retention with

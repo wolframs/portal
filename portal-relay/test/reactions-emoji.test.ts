@@ -38,6 +38,7 @@ function makeRelay() {
     ],
     addReaction: async (...args: unknown[]) => { calls.addReaction.push(args); },
     removeReaction: async (...args: unknown[]) => { calls.removeReaction.push(args); },
+    isGuildAllowed: () => true,
   };
   // Bypass message-store + capability lookups; we only exercise the react wiring.
   relay.resolveRef = async () => ({ channelId: 'chan', threadId: undefined, discordMsgId: 'disc1', guildId: GUILD, relayId: 'r1' });

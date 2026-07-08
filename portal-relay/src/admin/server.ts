@@ -35,6 +35,17 @@ export interface AdminDeps {
   audit: AuditLog;
   /** Allowed guilds (id + name + member count) — the bot's view. */
   listGuilds(): Array<{ id: string; name: string; memberCount: number }>;
+  /** EVERY guild the bot is joined to, with the live allowed flag — feeds the
+   *  super-admin allow-list editor's "joined but not allowed" picker. */
+  listAllGuilds(): Array<{ id: string; name: string; memberCount: number; allowed: boolean }>;
+  /** Guild allow-list ops. `editable` false ⇒ env-managed (legacy DISCORD_GUILD_ID
+   *  snapshot); mutations are rejected with NOT_EDITABLE. */
+  allowlist: {
+    editable: boolean;
+    list(): string[];
+    allow(guildId: string): boolean;
+    disallow(guildId: string): boolean;
+  };
   /** A guild's Discord roles (for `mirrorRole` pickers). */
   listRoles(guildId: string): Array<{ id: string; guildId: string; name: string; pooled: boolean }>;
   /** A guild's channels (for `channels`-scope pickers). */
@@ -120,6 +131,12 @@ export class AdminServer {
     // scope selector uses this, so it lands on guilds that have data rather than
     // every guild the admin happens to own on Discord.
     if (method === 'GET' && path === '/admin/guilds') return this.onGuilds(res, session);
+
+    // Guild allow-list editing — super-admin only. (The exact-GET above stays
+    // first: it serves the scope selector for ALL admins.)
+    if (path === '/admin/guilds' || path.startsWith('/admin/guilds/')) {
+      return this.onGuildAllowlist(req, res, session, method, path);
+    }
 
     // Global access-role catalog authoring — super-admin only (RFC-005 §5.3).
     if (path === '/admin/roles' || path.startsWith('/admin/roles/')) {
@@ -577,6 +594,88 @@ export class AdminServer {
       const ok = this.deps.permissions.removeRole(name);
       this.audit.append({ actor: this.actorOf(session), action: 'role.delete', target: name, ok });
       return sendJson(res, ok ? 200 : 404, ok ? { ok: true } : err('NOT_FOUND', 'no such role'));
+    }
+    sendJson(res, 404, err('NOT_FOUND', 'no such route'));
+  }
+
+  // ── Guild allow-list editing (super-admin) ──
+
+  private async onGuildAllowlist(
+    req: IncomingMessage,
+    res: ServerResponse,
+    session: AdminSession,
+    method: string,
+    path: string,
+  ): Promise<void> {
+    if (!session.isSuper) {
+      this.audit.append({
+        actor: this.actorOf(session),
+        action: 'authz.denied',
+        ok: false,
+        detail: { method, path },
+      });
+      return sendJson(res, 403, err('FORBIDDEN', 'guild allow-list is super-admin only'));
+    }
+    // GET /admin/guilds/all — every joined guild + allowed flag, plus allowed-
+    // but-not-joined (dormant pre-authorizations). `allowlist` lets the UI
+    // distinguish env-empty (allow-all) from store-empty (deny-all).
+    if (method === 'GET' && path === '/admin/guilds/all') {
+      const bot = this.deps.listAllGuilds();
+      const known = new Set(bot.map((g) => g.id));
+      const notJoined = this.deps.allowlist
+        .list()
+        .filter((id) => !known.has(id))
+        .map((id) => ({ id, name: null, memberCount: null, allowed: true, present: false }));
+      return sendJson(res, 200, {
+        editable: this.deps.allowlist.editable,
+        allowlist: this.deps.allowlist.list(),
+        guilds: [...bot.map((g) => ({ ...g, present: true })), ...notJoined],
+      });
+    }
+    if (method !== 'GET' && !this.csrfOk(req, session)) {
+      return sendJson(res, 403, err('CSRF', 'missing or invalid CSRF token'));
+    }
+    if (method !== 'GET' && !this.deps.allowlist.editable) {
+      return sendJson(
+        res,
+        409,
+        err('NOT_EDITABLE', 'allow-list is env-managed (DISCORD_GUILD_ID); set PORTAL_GUILDS to enable editing'),
+      );
+    }
+    // POST /admin/guilds {guildId} — allow. Accepts snowflake-shaped ids the
+    // bot isn't in yet (pre-authorize, then invite the bot).
+    if (method === 'POST' && path === '/admin/guilds') {
+      const body = await readJson(req);
+      const gid = typeof body?.guildId === 'string' ? body.guildId.trim() : '';
+      if (!/^\d{5,25}$/.test(gid)) return sendJson(res, 400, err('INVALID', 'guildId must be a Discord snowflake'));
+      const added = this.deps.allowlist.allow(gid);
+      const present = this.deps.listAllGuilds().some((g) => g.id === gid);
+      this.audit.append({
+        actor: this.actorOf(session),
+        action: 'guild.allow',
+        target: gid,
+        guildId: gid,
+        ok: true,
+        detail: { added, present },
+      });
+      return sendJson(res, 200, {
+        ok: true,
+        added,
+        present,
+        allowlist: this.deps.allowlist.list(),
+        ...(present ? {} : { warning: 'bot is not in this guild yet — invite it, or the entry stays dormant' }),
+      });
+    }
+    // DELETE /admin/guilds/:gid — disallow. Digits-only ⇒ never matches /all.
+    const del = /^\/admin\/guilds\/(\d{5,25})$/.exec(path);
+    if (method === 'DELETE' && del) {
+      if (!this.deps.allowlist.disallow(del[1])) return sendJson(res, 404, err('NOT_FOUND', 'guild not in allow-list'));
+      this.audit.append({ actor: this.actorOf(session), action: 'guild.disallow', target: del[1], guildId: del[1], ok: true });
+      return sendJson(res, 200, {
+        ok: true,
+        allowlist: this.deps.allowlist.list(),
+        denyAll: this.deps.allowlist.list().length === 0,
+      });
     }
     sendJson(res, 404, err('NOT_FOUND', 'no such route'));
   }

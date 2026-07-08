@@ -147,7 +147,10 @@ export class DiscordBot implements WebhookOps, RoleOps {
 
   constructor(
     private token: string,
-    private guildIds: string[],
+    /** Live guild allow-list accessor: null = allow all (legacy env mode);
+     *  string[] = explicit list, empty = deny all. Read on every check so
+     *  runtime edits (admin panel / hot-reload) apply without a reconnect. */
+    private allowedGuilds: () => string[] | null,
     opts: { guildMembersIntent?: boolean; maxInlineTotalBytes?: number; allowPathFiles?: boolean } = {},
   ) {
     this.maxInlineTotalBytes = opts.maxInlineTotalBytes ?? 8 * 1024 * 1024;
@@ -198,7 +201,13 @@ export class DiscordBot implements WebhookOps, RoleOps {
 
   private guildAllowed(guildId: string | null | undefined): boolean {
     if (!guildId) return false;
-    return this.guildIds.length === 0 || this.guildIds.includes(guildId);
+    const list = this.allowedGuilds();
+    return list === null || list.includes(guildId);
+  }
+
+  /** Public live allow-check (relay gates capability resolution on it). */
+  isGuildAllowed(guildId: string): boolean {
+    return this.guildAllowed(guildId);
   }
 
   // ── WebhookOps ──
@@ -364,6 +373,18 @@ export class DiscordBot implements WebhookOps, RoleOps {
     return [...this.client.guilds.cache.values()]
       .filter((g) => this.guildAllowed(g.id))
       .map((g) => ({ id: g.id, name: g.name, memberCount: g.memberCount }));
+  }
+
+  /** EVERY joined guild (the cache holds all of them regardless of the
+   *  allow-list) with the live allowed flag — feeds the admin allow-list
+   *  editor's "joined but not allowed" picker. */
+  listAllGuilds(): Array<{ id: string; name: string; memberCount: number; allowed: boolean }> {
+    return [...this.client.guilds.cache.values()].map((g) => ({
+      id: g.id,
+      name: g.name,
+      memberCount: g.memberCount,
+      allowed: this.guildAllowed(g.id),
+    }));
   }
 
   /** Whether the relay holds the GuildMembers intent (full roster vs. partial). */

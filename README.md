@@ -38,6 +38,10 @@ PORTAL_IDENTITY=./identity.json           # who:  [{ id, displayName, avatar, to
 PORTAL_PERMISSIONS=./permissions.json     # what: per-persona, guild/channel-aware caps
 PORTAL_AVATAR_BASE_URL=https://…/avatars  # public base for relative avatar filenames
 DISCORD_GUILD_ID=<guildId>                # optional scope to specific guild(s)
+PORTAL_GUILDS=./guilds.json               # optional: persisted guild allow-list, editable
+                                          # at runtime from the admin panel (super-admin
+                                          # only, audited). Seeded from DISCORD_GUILD_ID on
+                                          # first boot; when active, EMPTY list = deny all.
 node portal-relay/dist/src/index.js
 ```
 

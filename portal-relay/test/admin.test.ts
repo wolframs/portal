@@ -1,12 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AdminConfig } from '../src/config.js';
 import { IdentityStore, generateToken, hashToken } from '../src/identity.js';
 import { PermissionsStore } from '../src/permissions.js';
 import { InviteStore } from '../src/invites.js';
+import { GuildAllowStore } from '../src/guild-allowlist.js';
 import { AdminServer, type AdminDeps } from '../src/admin/server.js';
 import { deriveAdminGuilds } from '../src/admin/oauth.js';
 import { SessionStore } from '../src/admin/sessions.js';
@@ -114,11 +115,17 @@ function fakeDiscordFetch(guilds: unknown[]): typeof fetch {
   }) as unknown as typeof fetch;
 }
 
-function setupDeps(superadmins: string[], guildAdmins: Record<string, string[]> = {}): {
+function setupDeps(
+  superadmins: string[],
+  guildAdmins: Record<string, string[]> = {},
+  opts: { allowlistEditable?: boolean } = {},
+): {
   deps: AdminDeps;
   identity: IdentityStore;
   permissions: PermissionsStore;
   invites: InviteStore;
+  allowStore: GuildAllowStore;
+  allowPath: string;
   cleanup: () => void;
 } {
   const dir = mkdtempSync(join(tmpdir(), 'portal-admin-'));
@@ -155,6 +162,9 @@ function setupDeps(superadmins: string[], guildAdmins: Record<string, string[]> 
   const identity = new IdentityStore(idPath, '');
   const permissions = new PermissionsStore(permPath);
   const invites = new InviteStore(invPath);
+  // Guild allow-list: numeric ids (the admin endpoints validate snowflakes).
+  const allowPath = join(dir, 'guilds.json');
+  const allowStore = new GuildAllowStore(allowPath, ['1111100000']);
   const channels: Record<string, string[]> = { G1: ['c1', 'c2'] };
   let codeN = 0;
   const deps: AdminDeps = {
@@ -164,6 +174,16 @@ function setupDeps(superadmins: string[], guildAdmins: Record<string, string[]> 
     invites,
     audit: new AuditLog(config.auditPath),
     listGuilds: () => [{ id: 'G1', name: 'Guild One', memberCount: 1 }],
+    listAllGuilds: () => [
+      { id: '1111100000', name: 'Guild One', memberCount: 1, allowed: allowStore.has('1111100000') },
+      { id: '2222200000', name: 'Guild Two', memberCount: 2, allowed: allowStore.has('2222200000') },
+    ],
+    allowlist: {
+      editable: opts.allowlistEditable ?? true,
+      list: () => allowStore.list(),
+      allow: (g) => allowStore.allow(g),
+      disallow: (g) => allowStore.disallow(g),
+    },
     listRoles: () => [{ id: 'role1', guildId: 'G1', name: 'Mods', pooled: false }],
     listChannels: (gid) => (channels[gid] ?? []).map((id) => ({ id, name: id, type: 'text' })),
     channelInGuild: (gid, cid) => (channels[gid] ?? []).includes(cid),
@@ -186,7 +206,7 @@ function setupDeps(superadmins: string[], guildAdmins: Record<string, string[]> 
     },
     newInviteCode: () => `inv_test_${++codeN}`,
   };
-  return { deps, identity, permissions, invites, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+  return { deps, identity, permissions, invites, allowStore, allowPath, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
 function parseSetCookie(res: Response, name: string): string | undefined {
@@ -573,6 +593,125 @@ test('integration: super-admin authors the role catalog', async () => {
   } finally {
     await server.close();
     ctx.cleanup();
+  }
+});
+
+test('integration: super-admin edits the guild allow-list', async () => {
+  const ctx = setupDeps(['admin1']);
+  const server = new AdminServer(ctx.deps, fakeDiscordFetch([{ id: 'G1', name: 'G', permissions: '0' }]));
+  await server.listen();
+  const base = `http://127.0.0.1:${server.boundPort}`;
+  try {
+    const session = await login(base, []);
+    const cookie = `portal_admin_session=${session}`;
+    const me = await (await fetch(`${base}/admin/me`, { headers: { cookie } })).json();
+
+    // GET /all: both guilds visible with live allowed flags; editable.
+    const all = await (await fetch(`${base}/admin/guilds/all`, { headers: { cookie } })).json();
+    assert.equal(all.editable, true);
+    assert.deepEqual(all.allowlist, ['1111100000']);
+    assert.equal(all.guilds.find((g: any) => g.id === '1111100000').allowed, true);
+    assert.equal(all.guilds.find((g: any) => g.id === '2222200000').allowed, false);
+
+    // Mutation without CSRF → 403.
+    const noCsrf = await fetch(`${base}/admin/guilds`, {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ guildId: '2222200000' }),
+    });
+    assert.equal(noCsrf.status, 403);
+
+    // POST: allow the joined-but-not-allowed guild; persists to disk.
+    const post = await fetch(`${base}/admin/guilds`, {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json', 'x-csrf-token': me.csrf },
+      body: JSON.stringify({ guildId: '2222200000' }),
+    });
+    assert.equal(post.status, 200);
+    const posted = await post.json();
+    assert.equal(posted.present, true);
+    assert.equal(posted.warning, undefined);
+    const onDisk = JSON.parse(readFileSync(ctx.allowPath, 'utf8'));
+    assert.ok(onDisk.guildIds.includes('2222200000'), 'allow persisted to guilds.json');
+
+    // POST junk → 400; POST a not-joined snowflake → 200 + warning + present:false.
+    const junk = await fetch(`${base}/admin/guilds`, {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json', 'x-csrf-token': me.csrf },
+      body: JSON.stringify({ guildId: 'not-a-snowflake' }),
+    });
+    assert.equal(junk.status, 400);
+    const dormant = await fetch(`${base}/admin/guilds`, {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json', 'x-csrf-token': me.csrf },
+      body: JSON.stringify({ guildId: '9999900000' }),
+    });
+    assert.equal(dormant.status, 200);
+    const dormantBody = await dormant.json();
+    assert.equal(dormantBody.present, false);
+    assert.ok(dormantBody.warning, 'not-joined allow carries a warning');
+    // GET /all surfaces the dormant entry as allowed + present:false.
+    const all2 = await (await fetch(`${base}/admin/guilds/all`, { headers: { cookie } })).json();
+    const ghost = all2.guilds.find((g: any) => g.id === '9999900000');
+    assert.equal(ghost.present, false);
+    assert.equal(ghost.allowed, true);
+
+    // DELETE: remove; second delete 404; removing the rest flags denyAll.
+    assert.equal((await fetch(`${base}/admin/guilds/9999900000`, { method: 'DELETE', headers: { cookie, 'x-csrf-token': me.csrf } })).status, 200);
+    assert.equal((await fetch(`${base}/admin/guilds/9999900000`, { method: 'DELETE', headers: { cookie, 'x-csrf-token': me.csrf } })).status, 404);
+    assert.equal((await fetch(`${base}/admin/guilds/2222200000`, { method: 'DELETE', headers: { cookie, 'x-csrf-token': me.csrf } })).status, 200);
+    const last = await fetch(`${base}/admin/guilds/1111100000`, { method: 'DELETE', headers: { cookie, 'x-csrf-token': me.csrf } });
+    assert.equal(last.status, 200);
+    assert.equal((await last.json()).denyAll, true, 'empty list is deny-all, and reported as such');
+  } finally {
+    await server.close();
+    ctx.cleanup();
+  }
+});
+
+test('integration: guild allow-list is super-admin only and env-mode is read-only', async () => {
+  // Non-super guild admin: scope GET still works, allow-list routes are 403.
+  const ctx = setupDeps([]);
+  const server = new AdminServer(ctx.deps, fakeDiscordFetch([{ id: 'G1', name: 'G1', permissions: MANAGE_GUILD }]));
+  await server.listen();
+  const base = `http://127.0.0.1:${server.boundPort}`;
+  try {
+    const session = await login(base, []);
+    const cookie = `portal_admin_session=${session}`;
+    assert.equal((await fetch(`${base}/admin/guilds`, { headers: { cookie } })).status, 200, 'scope selector GET unaffected');
+    assert.equal((await fetch(`${base}/admin/guilds/all`, { headers: { cookie } })).status, 403);
+    const me = await (await fetch(`${base}/admin/me`, { headers: { cookie } })).json();
+    const post = await fetch(`${base}/admin/guilds`, {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json', 'x-csrf-token': me.csrf },
+      body: JSON.stringify({ guildId: '2222200000' }),
+    });
+    assert.equal(post.status, 403);
+  } finally {
+    await server.close();
+    ctx.cleanup();
+  }
+
+  // Env-managed (editable:false): GET reports it, mutations 409.
+  const ctx2 = setupDeps(['admin1'], {}, { allowlistEditable: false });
+  const server2 = new AdminServer(ctx2.deps, fakeDiscordFetch([{ id: 'G1', name: 'G', permissions: '0' }]));
+  await server2.listen();
+  const base2 = `http://127.0.0.1:${server2.boundPort}`;
+  try {
+    const session = await login(base2, []);
+    const cookie = `portal_admin_session=${session}`;
+    const all = await (await fetch(`${base2}/admin/guilds/all`, { headers: { cookie } })).json();
+    assert.equal(all.editable, false);
+    const me = await (await fetch(`${base2}/admin/me`, { headers: { cookie } })).json();
+    const post = await fetch(`${base2}/admin/guilds`, {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json', 'x-csrf-token': me.csrf },
+      body: JSON.stringify({ guildId: '2222200000' }),
+    });
+    assert.equal(post.status, 409);
+  } finally {
+    await server2.close();
+    ctx2.cleanup();
   }
 });
 

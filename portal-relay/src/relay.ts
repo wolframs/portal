@@ -21,6 +21,7 @@ import type {
 import type { InviteTemplate, PersonaIdentity, PersonaPolicy, RelayConfig, Scope } from './config.js';
 import { DiscordBot, type ChannelMeta, type IncomingMessage } from './discord-bot.js';
 import { Gateway, type GatewayHooks, Session } from './gateway.js';
+import { GuildAllowStore, type GuildAllowChange } from './guild-allowlist.js';
 import { HistoryCache } from './history-cache.js';
 import { IdentityStore, type IdentityChange, generateToken, hashToken } from './identity.js';
 import { InviteStore } from './invites.js';
@@ -38,6 +39,8 @@ export class Relay implements GatewayHooks {
   readonly identity: IdentityStore;
   readonly permissions: PermissionsStore;
   readonly invites?: InviteStore;
+  /** Store-backed guild allow-list (PORTAL_GUILDS). Undefined ⇒ legacy env mode. */
+  private guildAllow?: GuildAllowStore;
   private roles: RolePool;
   private webhooks: WebhookPool;
   private store: MessageStore;
@@ -51,7 +54,12 @@ export class Relay implements GatewayHooks {
   private audit?: AuditLog;
 
   constructor(private config: RelayConfig) {
-    this.bot = new DiscordBot(config.discordToken, config.guildIds, {
+    // Guild allow-list: store mode (PORTAL_GUILDS, editable, empty ⇒ deny all)
+    // or legacy env mode (DISCORD_GUILD_ID snapshot, empty ⇒ allow all = null).
+    if (config.guildAllowPath) this.guildAllow = new GuildAllowStore(config.guildAllowPath, config.guildIds);
+    const allowedGuilds = (): string[] | null =>
+      this.guildAllow ? this.guildAllow.list() : config.guildIds.length ? config.guildIds : null;
+    this.bot = new DiscordBot(config.discordToken, allowedGuilds, {
       guildMembersIntent: config.guildMembersIntent,
       maxInlineTotalBytes: config.maxInlineFileBytes,
       allowPathFiles: config.allowPathFiles,
@@ -84,6 +92,13 @@ export class Relay implements GatewayHooks {
         invites: this.invites,
         audit: this.audit,
         listGuilds: () => this.bot.listGuilds(),
+        listAllGuilds: () => this.bot.listAllGuilds(),
+        allowlist: {
+          editable: !!this.guildAllow,
+          list: () => (this.guildAllow ? this.guildAllow.list() : config.guildIds),
+          allow: (gid) => this.guildAllow!.allow(gid),
+          disallow: (gid) => this.guildAllow!.disallow(gid),
+        },
         listRoles: (gid) => this.bot.listRoles(gid, config.rolePool.prefix),
         listChannels: (gid) =>
           this.bot.listChannelMetas(gid).map((c) => ({
@@ -128,13 +143,18 @@ export class Relay implements GatewayHooks {
       }
     });
     this.bot.on('ready', () => this.mirror.clear());
+    // A pre-authorized guild (allow-listed before the bot joined) lights up the
+    // moment the bot joins it; discord-bot only fires this for allowed guilds.
+    this.bot.on('guildCreate', (guildId) => this.onGuildAllowChange({ added: [guildId], removed: [] }));
     // Live identity/permission changes → wire events.
     this.identity.onChange((c) => void this.onIdentityChange(c).catch((e) => console.error('[portal-relay] identity change:', (e as Error).message)));
     this.permissions.onChange((c) => this.onPermissionChange(c));
+    this.guildAllow?.onChange((c) => this.onGuildAllowChange(c));
     if (this.config.watchConfig) {
       this.identity.startWatching();
       this.permissions.startWatching();
       this.invites?.startWatching();
+      this.guildAllow?.startWatching();
     }
     if (this.invites) console.error('[portal-relay] self-registration enabled (invites)');
     await this.bot.connect();
@@ -147,6 +167,7 @@ export class Relay implements GatewayHooks {
     this.identity.stopWatching();
     this.permissions.stopWatching();
     this.invites?.stopWatching();
+    this.guildAllow?.stopWatching();
     this.store.flush();
     this.readState.flush();
     await this.admin?.close();
@@ -197,6 +218,34 @@ export class Relay implements GatewayHooks {
         channelId: meta.id,
         capabilities: this.capsFor(c.personaId, meta.id, meta.guildId),
       });
+    }
+  }
+
+  /** Guild allow-list changed at runtime (admin edit, hot-reload, or the bot
+   *  joining a pre-authorized guild). The bot's cache already holds every
+   *  joined guild, so no Discord reconnect is involved — just tell sessions. */
+  private onGuildAllowChange(c: GuildAllowChange): void {
+    for (const gid of c.added) {
+      this.mirror.invalidateGuild(gid);
+      // Accessor is live: an allowed+joined guild shows up here. Not found ⇒
+      // pre-authorized but not joined yet — dormant until guildCreate fires.
+      const g = this.bot.listGuilds().find((x) => x.id === gid);
+      if (!g) continue;
+      const metas = this.bot.listChannelMetas(gid);
+      for (const personaId of this.gateway.activePersonas()) {
+        this.gateway.dispatch(personaId, {
+          type: 'guild_create',
+          guild: { id: g.id, native: g.id, name: g.name, memberCount: g.memberCount },
+          channels: metas.map((m) => this.toPortalChannel(m, personaId)),
+        });
+      }
+    }
+    for (const gid of c.removed) {
+      this.mirror.invalidateGuild(gid);
+      this.repushGuildCaps(gid); // capsFor's allow-gate zeroes them out
+      for (const personaId of this.gateway.activePersonas()) {
+        this.gateway.dispatch(personaId, { type: 'guild_delete', guildId: gid });
+      }
     }
   }
 
@@ -1036,6 +1085,9 @@ export class Relay implements GatewayHooks {
 
   private capsFor(personaId: string, channelId: string, guildId: string | null): Capability[] {
     if (!this.identity.get(personaId)) return [];
+    // Allow-list gate: no capabilities in guilds the relay doesn't serve, even
+    // for scope:{all} personas addressing raw channel ids (fail closed).
+    if (guildId && !this.bot.isGuildAllowed(guildId)) return [];
     const allowed = this.permissions.resolve(personaId, guildId, channelId);
     const channel = this.bot.channelForPerms(channelId);
     const me = guildId ? this.bot.meIn(guildId) : null;

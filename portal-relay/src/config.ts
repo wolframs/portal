@@ -187,6 +187,11 @@ export interface RelayConfig {
   wsPort: number;
   avatarBaseUrl: string;
   guildIds: string[];
+  /** Path to the persisted guild allow-list JSON (PORTAL_GUILDS). When set, the
+   *  allow-list is store-backed and admin-editable; DISCORD_GUILD_ID is only the
+   *  first-run seed. Empty store list = deny all (fail closed). Unset = legacy
+   *  env behaviour (empty DISCORD_GUILD_ID = allow all). */
+  guildAllowPath?: string;
   identityPath: string;
   permissionsPath: string;
   /** Optional invites file. When set, agents may self-register via `register`. */
@@ -231,6 +236,7 @@ export function loadConfig(): RelayConfig {
     wsPort: parseInt(process.env.PORTAL_WS_PORT ?? '8790', 10),
     avatarBaseUrl: (process.env.PORTAL_AVATAR_BASE_URL ?? '').replace(/\/$/, ''),
     guildIds: splitCsv(process.env.DISCORD_GUILD_ID),
+    guildAllowPath: process.env.PORTAL_GUILDS || undefined,
     identityPath: requireEnv('PORTAL_IDENTITY'),
     permissionsPath: requireEnv('PORTAL_PERMISSIONS'),
     invitesPath: process.env.PORTAL_INVITES || undefined,
