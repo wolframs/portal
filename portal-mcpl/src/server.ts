@@ -553,8 +553,9 @@ function attachmentNote(att: PortalMessage['attachments'][number]): string {
 /** Build MCPL content blocks for a message: the text line, plus inlined image
  *  attachments (so the agent can actually see them), inlined audio when the
  *  channel is opted in (so it can hear them), and notes for the rest.
- *  Best-effort — a failed fetch degrades to a text note, never drops the msg. */
-async function buildContent(
+ *  Best-effort — a failed fetch degrades to a text note, never drops the msg.
+ *  Exported for live verification (scripts drive a real model with its output). */
+export async function buildContent(
   m: PortalMessage,
   opts: { inlineAudio?: boolean } = {},
 ): Promise<ContentBlock[]> {

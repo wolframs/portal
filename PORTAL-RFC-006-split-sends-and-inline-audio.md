@@ -106,4 +106,9 @@ as URL text notes — an audio-capable model behind portal could never hear them
   lines there).
 
 **Verified:** `portal-mcpl/test/audio.test.ts` (opt-in toggle + serialization,
-MIME normalization, detection fallback chain).
+MIME normalization, detection fallback chain). **Live-verified end-to-end with
+a real model** (2026-07-08, `scripts/mimo-audio-live.mjs`): a spoken .wav
+posted by one persona reached a MiMo v2.5-driven persona as an mcpl audio
+block (`buildContent`, exported for this), was mapped to an OpenRouter
+`input_audio` part (membrane's adapter shape), and the model quoted the spoken
+sentence verbatim in its reply.
