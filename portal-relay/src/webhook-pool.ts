@@ -40,6 +40,20 @@ export interface WebhookOps {
 
 const MARKER = 'portal:relay';
 
+/** A multi-part send failed after some parts were already posted. */
+export class PartialSendError extends Error {
+  constructor(
+    /** Discord message ids of the parts that DID send, in order. */
+    public readonly sentIds: string[],
+    public readonly webhookId: string,
+    /** The underlying send failure. */
+    public readonly reason: Error,
+  ) {
+    super(`part ${sentIds.length + 1} failed: ${reason.message}`);
+    this.name = 'PartialSendError';
+  }
+}
+
 interface ChannelPool {
   ids: string[];
   /** Per-webhook tail promise; new sends chain onto it for ordering. */
@@ -92,19 +106,44 @@ export class WebhookPool {
     personaId: string,
     opts: WebhookSendOpts,
   ): Promise<{ messageId: string; webhookId: string }> {
+    try {
+      const { messageIds, webhookId } = await this.sendMany(parentChannelId, personaId, [opts]);
+      return { messageId: messageIds[0], webhookId };
+    } catch (err) {
+      // Single send — unwrap to the underlying failure callers always saw.
+      throw err instanceof PartialSendError ? err.reason : err;
+    }
+  }
+
+  /** Send several messages as ONE queue item on the persona's webhook, so the
+   *  parts of a split send stay contiguous (no same-webhook send can land
+   *  between them). On a mid-sequence failure, rejects with a `PartialSendError`
+   *  carrying the ids that DID go out so the caller can still record them. */
+  async sendMany(
+    parentChannelId: string,
+    personaId: string,
+    optsList: WebhookSendOpts[],
+  ): Promise<{ messageIds: string[]; webhookId: string }> {
     const pool = await this.ensurePool(parentChannelId);
     const webhookId = this.pick(pool, personaId);
+    const task = async (): Promise<string[]> => {
+      const ids: string[] = [];
+      for (const opts of optsList) {
+        try {
+          ids.push((await this.ops.sendWebhook(webhookId, opts)).messageId);
+        } catch (err) {
+          throw new PartialSendError(ids, webhookId, err as Error);
+        }
+      }
+      return ids;
+    };
     const prev = pool.tails.get(webhookId) ?? Promise.resolve();
-    const next = prev.then(
-      () => this.ops.sendWebhook(webhookId, opts),
-      () => this.ops.sendWebhook(webhookId, opts), // prior failure shouldn't block the queue
-    );
+    const next = prev.then(task, task); // prior failure shouldn't block the queue
     pool.tails.set(
       webhookId,
       next.catch(() => undefined),
     );
-    const { messageId } = await next;
-    return { messageId, webhookId };
+    return { messageIds: await next, webhookId };
   }
 
   /** Adopt a parent channel's webhooks into the cache. Needed before editing or

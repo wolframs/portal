@@ -20,6 +20,7 @@ import type {
 } from '@animalabs/portal-protocol';
 import type { InviteTemplate, PersonaIdentity, PersonaPolicy, RelayConfig, Scope } from './config.js';
 import { DiscordBot, type ChannelMeta, type IncomingMessage } from './discord-bot.js';
+import { splitPreservingMarkdown, type ChunkPiece } from './discord-markdown.js';
 import { Gateway, type GatewayHooks, Session } from './gateway.js';
 import { GuildAllowStore, type GuildAllowChange } from './guild-allowlist.js';
 import { HistoryCache } from './history-cache.js';
@@ -30,9 +31,12 @@ import { MirrorCache } from './mirror-cache.js';
 import { PermissionsStore, type PermissionChange, computeCapabilities } from './permissions.js';
 import { ReadStateStore } from './read-state.js';
 import { RolePool } from './role-pool.js';
-import { WebhookPool } from './webhook-pool.js';
+import { PartialSendError, WebhookPool, type WebhookSendOpts } from './webhook-pool.js';
 import { AdminServer, type AdminDeps } from './admin/server.js';
 import { AuditLog } from './admin/audit.js';
+
+/** Discord's hard per-message content limit. */
+const DISCORD_MSG_LIMIT = 2000;
 
 export class Relay implements GatewayHooks {
   private bot: DiscordBot;
@@ -497,23 +501,47 @@ export class Relay implements GatewayHooks {
         if (!ref.webhookId) throw rpcError('NOT_FOUND', 'no webhook recorded for message');
         this.requireCap(personaId, ref.channelId, 'EDIT_OWN');
         await this.webhooks.ensureLoaded(ref.channelId); // adopt webhooks post-restart
-        await this.webhooks.edit(ref.webhookId, ref.discordMsgId, p.content, ref.threadId);
+        const primary = this.primaryOf(ref);
+        // All parts of a split went out on one webhook; a rehydrated primary
+        // missing its webhookId can safely borrow the addressed part's.
+        if (!primary.webhookId) primary.webhookId = ref.webhookId;
+        await this.editMessage(primary, p.content);
         return {};
       }
       case 'delete_message': {
         const p = params as RpcParams<'delete_message'>;
         const ref = await this.resolveRef(p.messageId);
         if (!ref) throw rpcError('NOT_FOUND', 'unknown message');
+        const primary = this.primaryOf(ref);
+        const partIds = primary.parts ?? [primary.discordMsgId];
+        let del: (id: string) => Promise<void>;
         if (ref.personaId === personaId && ref.webhookId) {
-          // Own webhook message → delete via the webhook.
+          // Own webhook message → delete via the webhook (every part of a split).
           this.requireCap(personaId, ref.channelId, 'DELETE_OWN');
           await this.webhooks.ensureLoaded(ref.channelId);
-          await this.webhooks.delete(ref.webhookId, ref.discordMsgId, ref.threadId);
+          const webhookId = ref.webhookId;
+          del = (id) => this.webhooks.delete(webhookId, id, ref.threadId);
         } else {
           // Someone else's message → moderation delete (bot-level), gated by the
           // MANAGE_MESSAGES capability (and the bot's Discord Manage Messages perm).
           this.requireCap(personaId, ref.channelId, 'MANAGE_MESSAGES');
-          await this.bot.deleteAnyMessage(ref.threadId ?? ref.channelId, ref.discordMsgId);
+          del = (id) => this.bot.deleteAnyMessage(ref.threadId ?? ref.channelId, id);
+        }
+        // Attempt every part before failing so one bad part doesn't strand the
+        // rest — but a failure must still surface, not report success.
+        const failed: Error[] = [];
+        for (const id of partIds) {
+          try {
+            await del(id);
+          } catch (err) {
+            failed.push(err as Error);
+          }
+        }
+        if (failed.length) {
+          throw rpcError(
+            'DISCORD_ERROR',
+            `failed to delete ${failed.length}/${partIds.length} message part(s): ${failed[0].message}`,
+          );
         }
         return {};
       }
@@ -683,7 +711,7 @@ export class Relay implements GatewayHooks {
   private async sendMessage(
     personaId: string,
     p: RpcParams<'send_message'>,
-  ): Promise<{ messageId: string }> {
+  ): Promise<{ messageId: string; messageIds?: string[] }> {
     const cfg = this.identity.get(personaId)!;
     const target = await this.bot.resolveTarget(p.channelId);
     if (!target) throw rpcError('NOT_FOUND', 'channel not found');
@@ -719,23 +747,124 @@ export class Relay implements GatewayHooks {
       }
     }
 
-    const { messageId, webhookId } = await this.webhooks.send(target.parentChannelId, personaId, {
+    const base = {
       threadId: target.threadId,
       username: cfg.displayName,
       avatarURL: this.identity.avatarUrl(cfg),
-      content,
-      files: p.files,
-    });
+    };
 
-    const ref = this.store.record({
-      channelId: target.parentChannelId,
-      threadId: target.threadId,
-      guildId,
-      discordMsgId: messageId,
-      personaId,
-      webhookId,
-    });
-    return { messageId: ref.relayId };
+    if (content.length <= DISCORD_MSG_LIMIT) {
+      const { messageId, webhookId } = await this.webhooks.send(target.parentChannelId, personaId, {
+        ...base,
+        content,
+        files: p.files,
+      });
+      const ref = this.store.record({
+        channelId: target.parentChannelId,
+        threadId: target.threadId,
+        guildId,
+        discordMsgId: messageId,
+        personaId,
+        webhookId,
+      });
+      return { messageId: ref.relayId };
+    }
+
+    // Over-long send → markdown-preserving split into several Discord messages.
+    // Files ride on the last part so they land under the complete text.
+    const { chunks } = splitPreservingMarkdown(content, DISCORD_MSG_LIMIT);
+    const optsList: WebhookSendOpts[] = chunks.map((c, i) => ({
+      ...base,
+      content: c.text,
+      files: i === chunks.length - 1 ? p.files : undefined,
+    }));
+    let sent: { messageIds: string[]; webhookId: string };
+    try {
+      sent = await this.webhooks.sendMany(target.parentChannelId, personaId, optsList);
+    } catch (err) {
+      // Record whatever DID land so the parts stay attributable/editable, and
+      // name them in the error so the caller can clean up or continue.
+      if (err instanceof PartialSendError && err.sentIds.length) {
+        const partial = this.recordParts(target, guildId, personaId, err.webhookId, err.sentIds, chunks);
+        throw rpcError(
+          'DISCORD_ERROR',
+          `split send failed after ${err.sentIds.length}/${chunks.length} parts ` +
+            `(${err.reason.message}); posted parts: ${partial.map((r) => r.relayId).join(', ')} ` +
+            `— delete them before retrying, or send the remainder separately`,
+        );
+      }
+      throw rpcError('DISCORD_ERROR', `split send failed: ${(err as Error).message}`);
+    }
+    const refs = this.recordParts(target, guildId, personaId, sent.webhookId, sent.messageIds, chunks);
+    return { messageId: refs[0].relayId, messageIds: refs.map((r) => r.relayId) };
+  }
+
+  /** Record every part of a split send: bridge strings for later stripping,
+   *  `parts` on the first part, `partOf` back-links on continuations. */
+  private recordParts(
+    target: { parentChannelId: string; threadId?: string },
+    guildId: string | null,
+    personaId: string,
+    webhookId: string,
+    discordMsgIds: string[],
+    chunks: ChunkPiece[],
+  ): MessageRef[] {
+    return discordMsgIds.map((discordMsgId, i) =>
+      this.store.record({
+        channelId: target.parentChannelId,
+        threadId: target.threadId,
+        guildId,
+        discordMsgId,
+        personaId,
+        webhookId,
+        ...splitMetaFor(discordMsgIds, i, chunks),
+      }),
+    );
+  }
+
+  /** The first part of a split send (edits/deletes operate on the whole set).
+   *  For a standalone message this is the ref itself. */
+  private primaryOf(ref: MessageRef): MessageRef {
+    if (!ref.partOf) return ref;
+    return this.store.getByDiscordId(ref.partOf) ?? ref;
+  }
+
+  /** Edit a (possibly split) persona message. The new content is re-split and
+   *  written across the existing Discord messages; surplus parts are deleted.
+   *  Growing beyond the original part count is refused — Discord offers no way
+   *  to insert messages in place. */
+  private async editMessage(primary: MessageRef, content: string): Promise<void> {
+    const partIds = primary.parts ?? [primary.discordMsgId];
+    const webhookId = primary.webhookId!;
+    if (content.length <= DISCORD_MSG_LIMIT && partIds.length === 1) {
+      await this.webhooks.edit(webhookId, primary.discordMsgId, content, primary.threadId);
+      return;
+    }
+    const { chunks } = splitPreservingMarkdown(content, DISCORD_MSG_LIMIT);
+    if (chunks.length > partIds.length) {
+      throw rpcError(
+        'INVALID_PARAMS',
+        `edited content needs ${chunks.length} messages but the original send has ` +
+          `${partIds.length} — shorten it, or delete and resend`,
+      );
+    }
+    const keptIds = partIds.slice(0, chunks.length);
+    for (let i = 0; i < chunks.length; i++) {
+      await this.webhooks.edit(webhookId, partIds[i], chunks[i].text, primary.threadId);
+      // Update this part's bridge metadata immediately — a concurrent
+      // fetch_history between edits must not strip with stale markers.
+      this.store.setSplitMeta(partIds[i], splitMetaFor(keptIds, i, chunks));
+    }
+    for (const id of partIds.slice(chunks.length)) {
+      try {
+        await this.webhooks.delete(webhookId, id, primary.threadId);
+        this.store.remove(id);
+      } catch (err) {
+        // Keep the ref — the message is still live in Discord; dropping the
+        // store row would orphan it beyond any future edit/delete.
+        console.error('[portal-relay] surplus part delete failed:', (err as Error).message);
+      }
+    }
   }
 
   private async react(
@@ -1025,11 +1154,13 @@ export class Relay implements GatewayHooks {
       threadId: inc.threadId,
       guildId: inc.guildId,
       author,
-      content: inc.content,
+      // Strip the synthetic bridge markers a split send injected, so agents
+      // (history, live events, pins) see their original unbroken markdown.
+      content: stripBridges(inc.content, ref),
       // Render custom-emoji tokens (<:name:id> / <a:name:id>) down to :name: in
       // the human-readable field so message text reads legibly for the model.
       // The raw `content` keeps the full tokens for correlation/round-tripping.
-      cleanContent: renderCustomEmojis(inc.cleanContent),
+      cleanContent: renderCustomEmojis(stripBridges(inc.cleanContent, ref)),
       attachments: inc.attachments,
       mentions: {
         personas,
@@ -1045,6 +1176,7 @@ export class Relay implements GatewayHooks {
         by: [],
       })),
       createdAt: inc.timestamp.toISOString(),
+      partOf: ref.partOf ? makeRelayId(ref.threadId ?? ref.channelId, ref.partOf) : undefined,
     };
     return { message, authorPersonaId };
   }
@@ -1110,8 +1242,47 @@ function rpcError(code: string, message: string): Error & { code: string } {
   return Object.assign(new Error(message), { code });
 }
 
+/** Split-send metadata for part `i` of a part-id set: bridge strings for later
+ *  stripping, `parts` on the first part, `partOf` back-links on continuations.
+ *  Shared by initial sends (recordParts) and re-split edits (setSplitMeta). */
+function splitMetaFor(
+  ids: string[],
+  i: number,
+  chunks: ChunkPiece[],
+): Pick<MessageRef, 'bridgeOpen' | 'bridgeClose' | 'parts' | 'partOf'> {
+  return {
+    bridgeOpen: chunks[i]?.bridgeOpen,
+    bridgeClose: chunks[i]?.bridgeClose,
+    parts: i === 0 && ids.length > 1 ? [...ids] : undefined,
+    partOf: i > 0 ? ids[0] : undefined,
+  };
+}
+
 /** Render custom-emoji tokens ('<:name:id>' / '<a:name:id>') down to ':name:'
  *  so message text reads legibly for the model. Unicode emoji are untouched. */
 function renderCustomEmojis(text: string): string {
   return text.replace(/<a?:(\w+):\d+>/g, (_full, name: string) => `:${name}:`);
+}
+
+/** Remove the synthetic reopener/closer a split send injected into this part.
+ *  Exact match first; a fence reopener also tolerates a rewritten info string
+ *  (Discord normalizes mentions/emojis in `cleanContent`) by matching on the
+ *  fence marker run alone and dropping that first line. */
+export function stripBridges(text: string, ref: { bridgeOpen?: string; bridgeClose?: string }): string {
+  let out = text;
+  if (ref.bridgeOpen) {
+    if (out.startsWith(ref.bridgeOpen)) {
+      out = out.slice(ref.bridgeOpen.length);
+    } else {
+      const fence = /^(`{3,}|~{3,})/.exec(ref.bridgeOpen)?.[1];
+      if (fence && out.startsWith(fence)) {
+        const nl = out.indexOf('\n');
+        out = nl === -1 ? '' : out.slice(nl + 1);
+      }
+    }
+  }
+  if (ref.bridgeClose && out.endsWith(ref.bridgeClose)) {
+    out = out.slice(0, out.length - ref.bridgeClose.length);
+  }
+  return out;
 }
