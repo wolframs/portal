@@ -165,6 +165,11 @@ export class PortalClient extends TypedEmitter<PortalClientEvents> {
   fetchHistory(params: RpcParams<'fetch_history'>) {
     return this.call('fetch_history', params);
   }
+  /** Show a typing indicator in the channel. Discord surfaces it as the shared
+   *  bot (webhooks can't type) and expires it after ~10 s — re-call to sustain. */
+  setTyping(channelId: string, threadId?: string) {
+    return this.call('set_typing', { channelId, threadId });
+  }
   subscribe(channelId: string) {
     const subs = (this.opts.subscriptions ??= []);
     if (!subs.includes(channelId)) subs.push(channelId);

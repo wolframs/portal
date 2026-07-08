@@ -168,15 +168,24 @@ async function main() {
   });
 
   async function handle(client, trigger) {
-    const { messages } = await client.fetchHistory({
-      channelId: trigger.channelId,
-      threadId: trigger.threadId,
-      limit: HISTORY,
-    });
-    messages.sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1));
-    const reply = await complete(renderTranscript(messages), trigger);
-    await client.sendMessage({ channelId: trigger.threadId ?? trigger.channelId, content: reply, replyToId: trigger.id });
-    log(`replied in ${trigger.channelId} to ${authorName(trigger)} (${reply.length} chars)`);
+    // Typing indicator while we think. Discord expires it after ~10 s, so pulse
+    // until the reply is out. Best-effort — a typing failure must not eat the reply.
+    const pulse = () => client.setTyping(trigger.channelId, trigger.threadId).catch(() => {});
+    void pulse();
+    const typing = setInterval(pulse, 8000);
+    try {
+      const { messages } = await client.fetchHistory({
+        channelId: trigger.channelId,
+        threadId: trigger.threadId,
+        limit: HISTORY,
+      });
+      messages.sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1));
+      const reply = await complete(renderTranscript(messages), trigger);
+      await client.sendMessage({ channelId: trigger.threadId ?? trigger.channelId, content: reply, replyToId: trigger.id });
+      log(`replied in ${trigger.channelId} to ${authorName(trigger)} (${reply.length} chars)`);
+    } finally {
+      clearInterval(typing);
+    }
   }
 
   await client.connect();
