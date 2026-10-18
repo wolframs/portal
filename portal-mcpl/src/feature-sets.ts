@@ -136,6 +136,7 @@ export const TOOL_FEATURE_SETS: Readonly<Record<string, string>> = {
   unreact: 'portal.messaging',
   list_emojis: 'portal.messaging',
   set_reaction_visibility: 'portal.messaging',
+  set_audio_visibility: 'portal.messaging',
   resolve_mentions: 'portal.messaging',
 
   list_guilds: 'portal.channels',

@@ -44,3 +44,16 @@ test('audioMimeFor: content-type first, extension fallback, undefined otherwise'
   assert.equal(audioMimeFor({ name: 'doc.pdf', contentType: 'application/pdf' }), undefined);
   assert.equal(audioMimeFor({ name: 'noext', contentType: null }), undefined);
 });
+
+test('set_audio_visibility takes a boolean enabled and refuses anything else by name', async () => {
+  const { PortalClient } = await import('@animalabs/portal-client');
+  const { PortalAgent } = await import('../src/agent.js');
+  const client = new PortalClient({ url: 'ws://test', token: 't', personaId: 'p' });
+  const agent = new PortalAgent(client);
+  const channelId = '100000000000000003';
+  await assert.rejects(agent.handleToolCall('set_audio_visibility', { channelId, enabled: 'false' }), /enabled must be true or false/);
+  await assert.rejects(agent.handleToolCall('set_audio_visibility', { channelId }), /enabled is required/);
+  assert.equal(agent.state.isAudioVisible(channelId), false);
+  await agent.handleToolCall('set_audio_visibility', { channelId, enabled: true });
+  assert.equal(agent.state.isAudioVisible(channelId), true);
+});

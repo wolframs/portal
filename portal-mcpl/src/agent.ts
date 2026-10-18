@@ -359,8 +359,9 @@ export class PortalAgent {
           : `Reaction visibility OFF for ${channelId}.`;
       }
       case 'set_audio_visibility': {
-        const channelId = str(args.channelId);
-        const enabled = Boolean(args.enabled);
+        const channelId = str(args.channelId, 'channelId');
+        const enabled = optBool(args.enabled, 'enabled');
+        if (enabled === undefined) throw new Error('Nothing ran: enabled is required, true or false.');
         // Durable per-channel opt-in; persisted via onChange. Content-shaping
         // only — delivery/wake behavior is unchanged (see server.ts buildContent).
         this.state.setAudioVisibility(channelId, enabled);

@@ -73,6 +73,7 @@ export const TOOL_CLASSES: Readonly<Record<string, readonly ToolClass[]>> = {
   unsubscribe_channel: ['control'],
   list_subscriptions: ['control'],
   set_reaction_visibility: ['control'],
+  set_audio_visibility: ['control'],
 };
 
 /** Tools deliberately served without a class (hosts treat them most strictly). */
