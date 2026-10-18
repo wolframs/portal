@@ -7,6 +7,15 @@
  */
 import type { ChannelDescriptor } from '@animalabs/mcpl-core';
 import type { PortalChannel } from '@animalabs/portal-protocol';
+import { formatChannelLabel } from './channel-names.js';
+
+export type PortalChannelDescriptor = ChannelDescriptor & {
+  initiallyOpen?: boolean;
+  capabilities?: {
+    history?: { maxMessages?: number; supportsBeforeMessage?: boolean };
+    acknowledgment?: { kind?: string; supportsValue?: boolean };
+  };
+};
 
 export function portalChannelId(channelId: string): string {
   return `portal:${channelId}`;
@@ -17,12 +26,25 @@ export function parsePortalChannelId(id: string): string | null {
   return parts.length === 2 && parts[0] === 'portal' ? parts[1] : null;
 }
 
-export function toDescriptor(channel: PortalChannel): ChannelDescriptor {
-  const guildLabel = channel.guildId ? '' : ' (dm)';
+/**
+ * `guildName` makes the label `#name (Guild)` — the display form that every
+ * channelId tool argument accepts back (see channel-names.ts: display form ==
+ * address form). Without it the label is the unqualified `#name`, which still
+ * parses but collides across guilds.
+ */
+export function toDescriptor(
+  channel: PortalChannel,
+  initiallyOpen = false,
+  maxHistory = 500,
+  guildName?: string,
+): PortalChannelDescriptor {
+  const label = channel.guildId
+    ? formatChannelLabel(channel.name ?? channel.id, guildName)
+    : `${formatChannelLabel(channel.name ?? channel.id)} (dm)`;
   return {
     id: portalChannelId(channel.id),
     type: 'portal',
-    label: `#${channel.name ?? channel.id}${guildLabel}`,
+    label,
     direction: 'bidirectional',
     address: { channelId: channel.id, guildId: channel.guildId },
     metadata: {
@@ -30,6 +52,11 @@ export function toDescriptor(channel: PortalChannel): ChannelDescriptor {
       parentId: channel.parentId,
       guildId: channel.guildId,
       capabilities: channel.capabilities,
+    },
+    initiallyOpen,
+    capabilities: {
+      history: { maxMessages: maxHistory, supportsBeforeMessage: true },
+      acknowledgment: { kind: 'reaction', supportsValue: true },
     },
   };
 }

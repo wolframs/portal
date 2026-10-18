@@ -1,4 +1,4 @@
-import type { PortalChannel, PortalGuild } from './channel.js';
+import type { Capability, PortalChannel, PortalGuild } from './channel.js';
 import type { PortalEmoji } from './emoji.js';
 import type { ChannelId, GuildId, PersonaId, RelayMessageId, RpcId, ThreadId, UserId } from './ids.js';
 import type { PortalMessage } from './message.js';
@@ -81,6 +81,7 @@ export interface ReactParams {
   native?: boolean;
 }
 
+/** Gated like react (ADD_REACTIONS on the message's channel). */
 export interface UnreactParams {
   messageId: RelayMessageId;
   emoji: string;
@@ -106,6 +107,10 @@ export interface FetchHistoryResult {
   messages: PortalMessage[];
 }
 
+/** Directory reads are capability-filtered like `ready` (portal#27): guilds
+ *  with rights, channels with ≥1 capability. Guild-level reads (channels,
+ *  members, mentions, roles, emoji) are FORBIDDEN in a guild the persona holds
+ *  no capability in. */
 export interface ListGuildsResult {
   guilds: PortalGuild[];
 }
@@ -134,6 +139,8 @@ export interface DeleteChannelParams {
   channelId: ChannelId;
 }
 
+/** Gated like send_message: SEND_MESSAGES on the channel, SEND_IN_THREADS in a
+ *  thread (the indicator is the shared bot's). */
 export interface SetTypingParams {
   channelId: ChannelId;
   threadId?: ThreadId;
@@ -152,12 +159,14 @@ export interface ListMembersParams {
   guildId: GuildId;
   /** Case-insensitive substring filter over username/displayName/nickname. */
   query?: string;
+  /** Default 100, clamped to [1, 1000]. */
   limit?: number;
 }
 export interface ListMembersResult {
   members: PortalMember[];
-  /** false when the relay bot lacks the GuildMembers intent (results are then
-   *  opportunistic/partial rather than the full roster). */
+  /** false unless the relay's member cache holds the guild's whole roster —
+   *  the bot lacks the GuildMembers intent, or the member warm failed or hasn't
+   *  finished (results are then opportunistic/partial). */
   membersAvailable: boolean;
 }
 
@@ -212,12 +221,99 @@ export interface ClaimInviteResult {
   roles: string[];
 }
 
+/**
+ * Machine-mint a single-use, short-lived, channel-scoped enrollment invite
+ * (the daemon/spawner door — the admin API is OAuth-session-only). Gated on
+ * the PORTAL_INVITE_MINTERS allowlist, and the delegated caps must be a
+ * subset of the minting persona's own effective caps on each scoped channel
+ * — verified again when the code is claimed, so revoking the minter revokes
+ * its outstanding codes. Channels-only scope by design: no `all`, no
+ * mirror shapes in a machine-minted grant.
+ */
+export interface MintInviteParams {
+  grant: {
+    caps: Capability[];
+    scope: { channels: ChannelId[] };
+  };
+  guildId: GuildId;
+  /** Machine mints are single-use; any value other than 1 is rejected. */
+  maxUses?: number;
+  /** Default 15; clamped to [1, 60]. */
+  expiresInMinutes?: number;
+  label?: string;
+}
+export interface MintInviteResult {
+  code: string;
+  /** ISO timestamp the code stops being claimable. */
+  expiresAt: string;
+}
+
 /** Rotate the calling persona's own token. The new token is returned in-band
  *  over the live session; the old token is invalidated immediately. */
 export type RotateTokenParams = Record<string, never>;
 export interface RotateTokenResult {
   /** The new plaintext token. Persist it — the old one no longer works. */
   token: string;
+}
+
+/** Ask the relay to join a voice channel and start transcribing. Requires
+ *  VOICE_LISTEN. Transcripts flow to sessions subscribed to the channel
+ *  (subscribe_channel). Idempotent: joining an already-joined channel is ok.
+ *  The relay holds ONE voice connection per guild: joining a different channel
+ *  of a guild it is already listening in fails with CONFLICT (message names the
+ *  channel) — voice_leave it first. Listening can end on its own (channel
+ *  deleted, bot moved, voice server unreachable); a `voice_status` event with
+ *  `joined: false` reports it and a fresh voice_join is required. */
+export interface VoiceJoinParams {
+  channelId: ChannelId;
+}
+export interface VoiceJoinResult {
+  /** Whether the relay is now (or already was) listening in the channel. */
+  listening: boolean;
+}
+
+export interface VoiceLeaveParams {
+  channelId: ChannelId;
+}
+
+/**
+ * A floor grant presented with voice_speak (FLOOR-RFC-001 §5 / RFC-006 §1.4).
+ * The relay never trusts the caller's identity claims inside a grant: the
+ * participant the grant is validated for is always the calling persona.
+ * Whether a grant is REQUIRED depends on the relay's configured authority —
+ * refuse-all (default, no floor service), ungoverned (operator opt-in), or a
+ * live floor validator once one is deployed.
+ */
+export interface VoiceGrant {
+  grantId: string;
+  /** FLOOR-RFC-001 §5 room binding the grant was issued for. */
+  roomBinding: string;
+  logicEpoch: string;
+  processEpoch: string;
+  /** ms epoch; null = no expiry communicated (authority still re-validates). */
+  expiresAt: number | null;
+}
+
+/** Speak text into a voice channel via the relay's TTS output path. Requires
+ *  VOICE_SPEAK, and the relay must already be joined to the channel
+ *  (voice_join) — speaking never implicitly joins a room: join is the visible
+ *  consent step. The call returns as soon as the utterance is queued; the
+ *  outcome (spoken / interrupted / refused / error, with the voiced/unvoiced
+ *  boundary and billed characters) arrives as a `voice_receipt` event carrying
+ *  the same requestId. Synthesis opens only when the room's carrier is clear
+ *  AND the grant re-validates at that moment; anything refused or dropped
+ *  while queued bills zero characters. */
+export interface VoiceSpeakParams {
+  channelId: ChannelId;
+  text: string;
+  /** Caller's idempotency/tracking key (unique per persona); the relay
+   *  generates one when absent. Echoed on the receipt. */
+  requestId?: string;
+  grant?: VoiceGrant;
+}
+export interface VoiceSpeakResult {
+  /** Key the terminal `voice_receipt` event will carry. */
+  requestId: string;
 }
 
 type Empty = Record<string, never>;
@@ -249,7 +345,12 @@ export interface RpcMethods {
   list_emojis: { params: ListEmojisParams; result: ListEmojisResult };
   list_pins: { params: ListPinsParams; result: ListPinsResult };
   claim_invite: { params: ClaimInviteParams; result: ClaimInviteResult };
+  mint_invite: { params: MintInviteParams; result: MintInviteResult };
   rotate_token: { params: RotateTokenParams; result: RotateTokenResult };
+  // ── Voice (relay joins, transcribes, fans out) ──
+  voice_join: { params: VoiceJoinParams; result: VoiceJoinResult };
+  voice_leave: { params: VoiceLeaveParams; result: Empty };
+  voice_speak: { params: VoiceSpeakParams; result: VoiceSpeakResult };
   // ── Server-authoritative read-state (catch-up / unread) ──
   get_pending_pings: { params: Empty; result: GetPendingPingsResult };
   list_unread: { params: Empty; result: ListUnreadResult };
@@ -273,7 +374,12 @@ export type RpcErrorCode =
   | 'INVALID_PARAMS'
   | 'RATE_LIMITED'
   | 'DISCORD_ERROR'
-  | 'INTERNAL';
+  | 'INTERNAL'
+  /** The relay is not configured for this feature (e.g. voice without ELEVENLABS_KEY). */
+  | 'UNAVAILABLE'
+  /** The request collides with live state the caller must clear first
+   *  (e.g. voice_join while this guild's listener is in another channel). */
+  | 'CONFLICT';
 
 export interface RpcError {
   code: RpcErrorCode;

@@ -14,18 +14,61 @@
 import type { PortalClient } from '@animalabs/portal-client';
 import type { AddressReason, PortalMessage } from '@animalabs/portal-protocol';
 import { AgentState, type PendingPing } from './agent-state.js';
+import {
+  buildCandidates,
+  channelLabel,
+  formatChannelLabel,
+  parseChannelRef,
+  resolveChannelRef,
+  type ResolveResult,
+} from './channel-names.js';
+import { chunkText } from './chunk.js';
 import { toolDefinitions } from './tools.js';
+import { resolveOutgoingFiles, type ResolveFilesOptions } from './files.js';
+
+/**
+ * Tools retired where the host opens and closes channels itself
+ * (hostOwnsChannelLifecycle): each answer says nothing ran and points to the
+ * host's own channel tools.
+ */
+const RETIRED_WHEN_HOST_OWNS_CHANNELS: Readonly<Record<string, string>> = {
+  subscribe_channel:
+    'subscribe_channel is retired here: this host opens and closes channels itself, so nothing ran. ' +
+    "Open the channel with your host's own channel tool instead, such as channel_open.",
+  unsubscribe_channel:
+    'unsubscribe_channel is retired here: this host opens and closes channels itself, so nothing ran. ' +
+    "Close the channel with your host's own channel tool instead, such as channel_close.",
+  list_subscriptions:
+    'list_subscriptions is retired here: this host keeps track of open channels itself, so nothing ran. ' +
+    "Your host's own channel tool lists them, such as channel_list.",
+  set_reaction_visibility:
+    'set_reaction_visibility is retired here, so nothing ran: reactions show in a channel while it is open, ' +
+    "and this host opens and closes channels itself. To show or hide them, open or close the channel with your host's " +
+    'own channel tools, such as channel_open and channel_close.',
+};
 
 export interface PortalAgentOptions {
   /** Restore persisted read-state (watermarks + pings). */
   state?: AgentState;
   /** Called when a new message is addressed to this persona — wire to a push. */
   onPing?: (ping: PendingPing) => void;
+  /** The surrounding MCPL host owns open/close state in Chronicle. This
+   *  disables the legacy subscription tools and mention auto-subscribe while
+   *  leaving the standalone Claude Code channel behavior unchanged. */
+  hostOwnsChannelLifecycle?: boolean;
+  /** How `send_message.files` paths/URLs are resolved to bytes (see files.ts). */
+  files?: ResolveFilesOptions;
+  /** Called after this persona does something PUBLIC (posts, reacts, edits) —
+   *  a beacon for supervisors that can't see every channel it acts in. */
+  onPublicActivity?: (kind: 'message' | 'reaction' | 'edit') => void;
 }
 
 export class PortalAgent {
   readonly state: AgentState;
   private onPing?: (ping: PendingPing) => void;
+  private hostOwnsChannelLifecycle: boolean;
+  private fileOpts: ResolveFilesOptions;
+  private onPublicActivity?: (kind: 'message' | 'reaction' | 'edit') => void;
 
   constructor(
     private client: PortalClient,
@@ -33,6 +76,9 @@ export class PortalAgent {
   ) {
     this.state = opts.state ?? new AgentState();
     this.onPing = opts.onPing;
+    this.hostOwnsChannelLifecycle = opts.hostOwnsChannelLifecycle === true;
+    this.fileOpts = opts.files ?? {};
+    this.onPublicActivity = opts.onPublicActivity;
     this.client.on('message', (e) => this.ingest(e.message, e.addressedToMe, e.reasons));
     this.client.on('messageUpdate', (e) => {
       // An edit to a message we track refreshes its preview but isn't a new ping.
@@ -41,7 +87,9 @@ export class PortalAgent {
     // A transport `resume` restores the event stream but NOT the relay session's
     // subscriptions (the new session starts empty). Reapply from durable state.
     // The fresh-`identify` path already carries them via the client's replay set.
-    this.client.on('resumed', () => this.reapplySubscriptions());
+    if (!this.hostOwnsChannelLifecycle) {
+      this.client.on('resumed', () => this.reapplySubscriptions());
+    }
   }
 
   /** Re-assert this agent's durable subscriptions on the live session. */
@@ -57,7 +105,7 @@ export class PortalAgent {
     // (non-mention) messages for unsubscribed personas — so without this, the
     // agent never sees the chatter between mentions. Subscribing now means
     // subsequent ambient messages are delivered and accumulate for the next wake.
-    if (addressedToMe && this.state.subscribe(message.channelId)) {
+    if (!this.hostOwnsChannelLifecycle && addressedToMe && this.state.subscribe(message.channelId)) {
       if (process.env.PORTAL_DEBUG) {
         console.error(`[portal-cc] auto-subscribed to ${message.channelId} (addressed here)`);
       }
@@ -70,7 +118,8 @@ export class PortalAgent {
   }
 
   get tools(): typeof toolDefinitions {
-    return toolDefinitions;
+    if (!this.hostOwnsChannelLifecycle) return toolDefinitions;
+    return toolDefinitions.filter((tool) => !Object.hasOwn(RETIRED_WHEN_HOST_OWNS_CHANNELS, tool.name));
   }
 
   /** Server-authoritative pending pings, including any accrued while this
@@ -100,61 +149,184 @@ export class PortalAgent {
     return { messages };
   }
 
+  /**
+   * Resolve a channel reference — raw snowflake, `portal:<id>`, or the
+   * `#name (Guild)` label the listings print — to a relay channel id. Reads the
+   * live cache every call (never a startup snapshot: a renamed or re-granted
+   * channel must resolve to what it is NOW). See channel-names.ts.
+   */
+  resolveChannelRef(ref: string): ResolveResult {
+    return resolveChannelRef(ref, () =>
+      buildCandidates(this.client.cache.allChannels(), this.client.cache.allGuilds()));
+  }
+
+  /** `#name (Guild)` for a cached channel; the raw id when unknown. */
+  labelFor(channelId: string): string {
+    const c = this.client.cache.getChannel(channelId);
+    if (!c) return channelId;
+    return formatChannelLabel(c.name ?? c.id, c.guildId ? this.client.cache.getGuild(c.guildId)?.name : undefined);
+  }
+
   /** Dispatch a tool call. Returns a plain JSON-able result. */
   async handleToolCall(name: string, args: Record<string, unknown>): Promise<unknown> {
-    switch (name) {
-      case 'send_message':
-        return this.client.sendMessage({
-          channelId: str(args.channelId),
-          content: optStr(args.content),
-          files: args.files as never,
-          replyToId: optStr(args.replyToId),
-          mentionPersonaIds: args.mentionPersonaIds as string[] | undefined,
-        });
-      case 'edit_message':
-        return this.client.editMessage(str(args.messageId), str(args.content));
-      case 'delete_message':
-        return this.client.deleteMessage(str(args.messageId));
-      case 'react':
-        return this.client.react(
-          str(args.messageId),
-          str(args.emoji),
-          Boolean(args.visible),
-          Boolean(args.native),
+    // A tool that won't run is answered before its arguments are looked at:
+    // a retired tool's pointer, or the unknown-name refusal, is the whole
+    // answer, whatever channel the call names.
+    if (this.hostOwnsChannelLifecycle && Object.hasOwn(RETIRED_WHEN_HOST_OWNS_CHANNELS, name)) {
+      throw new Error(RETIRED_WHEN_HOST_OWNS_CHANNELS[name]);
+    }
+    if (!toolDefinitions.some((tool) => tool.name === name)) {
+      throw new Error(unknownToolMessage(name));
+    }
+    // THE chokepoint for channel addressing: every tool that takes a channelId
+    // goes through here, so a name is resolved exactly once, before any side
+    // effect, or the call fails audibly — never a silent pick, never a name
+    // passed downstream hoping the relay rejects it. Ids pass through untouched.
+    if (typeof args.channelId === 'string' && args.channelId.trim()) {
+      const parsed = parseChannelRef(args.channelId);
+      if (parsed?.kind !== 'id') {
+        const resolved = this.resolveChannelRef(args.channelId);
+        if (!resolved.ok) {
+          throw new Error(`Nothing ran: channelId ${shortJson(args.channelId)} ${resolved.message}`);
+        }
+        args = { ...args, channelId: resolved.id };
+      } else if (parsed.id !== args.channelId) {
+        args = { ...args, channelId: parsed.id }; // `portal:<id>` → bare id
+      }
+    }
+    // threadId goes through the same chokepoint. Absent or null means no
+    // thread. Anything else must name one, in a form channelId accepts, or
+    // the call is refused here, before anything is sent or read: a value that
+    // named no thread used to be dropped, and the post landed in the parent.
+    // A threadId equal to channelId names the thread itself, which channelId
+    // alone already addresses.
+    if (args.threadId === null) {
+      args = { ...args, threadId: undefined };
+    } else if (args.threadId !== undefined) {
+      const parsed = typeof args.threadId === 'string' ? parseChannelRef(args.threadId) : null;
+      // Threads aren't addressable by label, so only an id names one.
+      if (parsed?.kind !== 'id') {
+        throw new Error(
+          `Nothing ran: threadId ${shortJson(args.threadId)} isn't a thread id. A thread is named by its id ` +
+            "(or portal:<id>), as create_thread returns it and as a message's threadId shows it; " +
+            'null or no threadId means no thread.',
         );
+      }
+      args = { ...args, threadId: parsed.id === args.channelId ? undefined : parsed.id };
+    }
+    switch (name) {
+      case 'send_message': {
+        // Discord caps content at 2000 chars — split long messages into
+        // sequential sends (files/reply/mentions ride on the first chunk).
+        const content = optStr(args.content, 'content');
+        const chunks = content !== undefined ? chunkText(content) : [content];
+        // Paths/URLs become inline bytes here, on the resident's host — the
+        // relay only ever sees `bytes` (RFC-003 keeps its own disk closed).
+        const files = await resolveOutgoingFiles(args.files, this.fileOpts);
+        if (!files && content === undefined) throw new Error('send_message needs content or files');
+        const posted: string[] = [];
+        let first: unknown;
+        for (let i = 0; i < chunks.length; i++) {
+          let result: unknown;
+          try {
+            result = await this.client.sendMessage({
+              channelId: str(args.channelId, 'channelId'),
+              // Every chunk goes to the same place: a thread under channelId
+              // when one is named, else channelId itself.
+              threadId: optStr(args.threadId, 'threadId'),
+              content: chunks[i],
+              ...(i === 0
+                ? {
+                    files,
+                    replyToId: optStr(args.replyToId, 'replyToId'),
+                    mentionPersonaIds: args.mentionPersonaIds as string[] | undefined,
+                  }
+                : {}),
+            });
+          } catch (e) {
+            if (i === 0) throw e;
+            // The earlier parts are posted, so a refusal of this part, which
+            // says nothing ran for its own call, isn't the whole answer; and
+            // posting them was public activity.
+            this.onPublicActivity?.('message');
+            throw new Error(
+              `Only part of the message was sent: the first ${i} of ${chunks.length} parts were posted ` +
+                `(${posted.map((id) => JSON.stringify(id)).join(', ')}), and part ${i + 1} may not have been. ` +
+                `Its call answered: "${(e as Error).message}" ` +
+                'To send the rest, call send_message with only the text that didn\'t go out; fetch_around shows what did.',
+            );
+          }
+          const id = (result as { messageId?: unknown } | undefined)?.messageId;
+          if (typeof id === 'string') posted.push(id);
+          first ??= result;
+        }
+        this.onPublicActivity?.('message');
+        return first;
+      }
+      case 'edit_message': {
+        const edited = await this.client.editMessage(str(args.messageId, 'messageId'), str(args.content, 'content'));
+        this.onPublicActivity?.('edit');
+        return edited;
+      }
+      case 'delete_message':
+        return this.client.deleteMessage(str(args.messageId, 'messageId'));
+      case 'react': {
+        const reacted = await this.client.react(
+          str(args.messageId, 'messageId'),
+          str(args.emoji, 'emoji'),
+          optBool(args.visible, 'visible') ?? false,
+          optBool(args.native, 'native') ?? false,
+        );
+        this.onPublicActivity?.('reaction');
+        return reacted;
+      }
       case 'unreact':
-        return this.client.unreact(str(args.messageId), str(args.emoji), Boolean(args.native));
+        return this.client.unreact(str(args.messageId, 'messageId'), str(args.emoji, 'emoji'), optBool(args.native, 'native') ?? false);
       case 'fetch_history':
         return this.client.fetchHistory({
-          channelId: str(args.channelId),
-          threadId: optStr(args.threadId),
-          limit: typeof args.limit === 'number' ? args.limit : undefined,
-          before: optStr(args.before),
-          after: optStr(args.after),
+          channelId: str(args.channelId, 'channelId'),
+          threadId: optStr(args.threadId, 'threadId'),
+          limit: optNum(args.limit, 'limit'),
+          before: optStr(args.before, 'before'),
+          after: optStr(args.after, 'after'),
         });
       case 'fetch_around':
         return this.fetchAround(
-          str(args.channelId),
-          str(args.messageId),
-          typeof args.limit === 'number' ? args.limit : 50,
-          optStr(args.threadId),
+          str(args.channelId, 'channelId'),
+          str(args.messageId, 'messageId'),
+          optNum(args.limit, 'limit') ?? 50,
+          optStr(args.threadId, 'threadId'),
         );
       case 'list_guilds':
         return this.client.call('list_guilds', {});
-      case 'list_channels':
-        return this.client.call('list_channels', { guildId: str(args.guildId) });
+      case 'list_channels': {
+        // Each channel carries its `label` — the exact string every channelId
+        // argument accepts (display form == address form). Threads/categories
+        // are labelled too but remain id-only addresses.
+        const guildId = str(args.guildId, 'guildId');
+        const guildName = this.client.cache.getGuild(guildId)?.name;
+        const res = (await this.client.call('list_channels', { guildId })) as {
+          channels: Array<{ id: string; name: string | null; type: string }>;
+        };
+        return {
+          channels: res.channels.map((c) => ({
+            ...c,
+            label: formatChannelLabel(c.name ?? c.id, guildName),
+          })),
+        };
+      }
       case 'create_thread':
         return this.client.call('create_thread', {
-          channelId: str(args.channelId),
-          name: str(args.name),
+          channelId: str(args.channelId, 'channelId'),
+          name: str(args.name, 'name'),
         });
       case 'subscribe_channel': {
-        const channelId = str(args.channelId);
+        const channelId = str(args.channelId, 'channelId');
         this.state.subscribe(channelId); // durable; persisted via onChange
         return this.client.subscribe(channelId);
       }
       case 'unsubscribe_channel': {
-        const channelId = str(args.channelId);
+        const channelId = str(args.channelId, 'channelId');
         this.state.unsubscribe(channelId);
         return this.client.unsubscribe(channelId);
       }
@@ -163,22 +335,22 @@ export class PortalAgent {
         return { channelIds: this.state.subscriptionList() };
       case 'list_members':
         return this.client.call('list_members', {
-          guildId: str(args.guildId),
-          query: optStr(args.query),
-          limit: typeof args.limit === 'number' ? args.limit : undefined,
+          guildId: str(args.guildId, 'guildId'),
+          query: optStr(args.query, 'query'),
+          limit: optNum(args.limit, 'limit'),
         });
       case 'resolve_mentions':
         return this.client.call('resolve_mentions', {
-          guildId: str(args.guildId),
+          guildId: str(args.guildId, 'guildId'),
           handles: (args.handles as string[]) ?? [],
         });
       case 'list_roles':
-        return this.client.call('list_roles', { guildId: str(args.guildId) });
+        return this.client.call('list_roles', { guildId: str(args.guildId, 'guildId') });
       case 'list_emojis':
-        return this.client.call('list_emojis', { guildId: optStr(args.guildId) });
+        return this.client.call('list_emojis', { guildId: optStr(args.guildId, 'guildId') });
       case 'set_reaction_visibility': {
-        const channelId = str(args.channelId);
-        const visible = Boolean(args.visible);
+        const channelId = str(args.channelId, 'channelId');
+        const visible = optBool(args.visible, 'visible') ?? false;
         // Durable per-channel opt-in; persisted via onChange. Reactions are shown
         // in context but NEVER wake the agent (see server.ts push path).
         this.state.setReactionVisibility(channelId, visible);
@@ -197,7 +369,18 @@ export class PortalAgent {
           : `Inline audio OFF for ${channelId}.`;
       }
       case 'list_pins':
-        return this.client.call('list_pins', { channelId: str(args.channelId) });
+        return this.client.call('list_pins', { channelId: str(args.channelId, 'channelId') });
+      case 'voice_join':
+        return this.client.call('voice_join', { channelId: str(args.channelId, 'channelId') });
+      case 'voice_leave':
+        return this.client.call('voice_leave', { channelId: str(args.channelId, 'channelId') });
+      case 'voice_speak':
+        return this.client.call('voice_speak', {
+          channelId: str(args.channelId, 'channelId'),
+          text: str(args.text, 'text'),
+          ...(args.requestId != null ? { requestId: str(args.requestId, 'requestId') } : {}),
+          ...(args.grant !== undefined ? { grant: args.grant as never } : {}),
+        });
       case 'get_pending_pings':
         // Server-authoritative: includes pings accrued while this session was
         // offline (the relay accumulates for every persona, online or not).
@@ -205,25 +388,64 @@ export class PortalAgent {
       case 'list_unread':
         return this.client.call('list_unread', {});
       case 'channel_missed':
-        return this.client.call('channel_missed', { channelId: str(args.channelId) });
+        return this.client.call('channel_missed', { channelId: str(args.channelId, 'channelId') });
       case 'mark_read': {
-        const channelId = str(args.channelId);
-        const uptoCreatedAt = optStr(args.uptoCreatedAt);
+        const channelId = str(args.channelId, 'channelId');
+        const uptoCreatedAt = optStr(args.uptoCreatedAt, 'uptoCreatedAt');
         // Advance the server watermark (durable) and the local live-wake state.
         this.state.markRead(channelId, uptoCreatedAt);
         await this.client.call('mark_read', { channelId, uptoCreatedAt });
         return { ok: true };
       }
       default:
-        throw new Error(`unknown tool ${name}`);
+        throw new Error(unknownToolMessage(name));
     }
   }
 }
 
-function str(v: unknown): string {
-  if (typeof v !== 'string') throw new Error('expected string argument');
+/** A string argument, refused by name before anything runs. */
+function str(v: unknown, name: string): string {
+  if (typeof v !== 'string') throw new Error(`Nothing ran: ${name} must be a string, got ${shortJson(v)}.`);
   return v;
 }
-function optStr(v: unknown): string | undefined {
-  return typeof v === 'string' ? v : undefined;
+/** An optional string argument: absent when undefined or null, refused by name when it's anything else. */
+function optStr(v: unknown, name: string): string | undefined {
+  if (v === undefined || v === null) return undefined;
+  if (typeof v !== 'string') throw new Error(`Nothing ran: ${name} must be a string when given, got ${shortJson(v)}.`);
+  return v;
+}
+/** An optional number argument: absent when undefined or null, refused by name when it's anything else. */
+function optNum(v: unknown, name: string): number | undefined {
+  if (v === undefined || v === null) return undefined;
+  if (typeof v !== 'number') throw new Error(`Nothing ran: ${name} must be a number when given, got ${shortJson(v)}.`);
+  return v;
+}
+/** An optional boolean argument: absent when undefined or null, refused by name when it's anything else. */
+function optBool(v: unknown, name: string): boolean | undefined {
+  if (v === undefined || v === null) return undefined;
+  if (typeof v !== 'boolean') throw new Error(`Nothing ran: ${name} must be true or false when given, got ${shortJson(v)}.`);
+  return v;
+}
+/** A caller's value for an error message, bounded so a huge one isn't echoed
+ *  whole: at most 60 characters, the cut's ellipsis included, counted and cut
+ *  by code points so a cut never splits a character. */
+export function shortJson(v: unknown): string {
+  let s: string;
+  try {
+    s = JSON.stringify(v) ?? String(v);
+  } catch {
+    s = String(typeof v);
+  }
+  const points = Array.from(s);
+  if (points.length <= 60) return s;
+  // A cut string keeps its closing quote, so the message around it still reads.
+  return s.startsWith('"') ? `${points.slice(0, 58).join('')}…"` : `${points.slice(0, 59).join('')}…`;
+}
+
+/**
+ * The refusal for a tool name the server doesn't have. The agent holds the
+ * list of tools it can call, so the refusal points there.
+ */
+export function unknownToolMessage(name: unknown): string {
+  return `There's no Portal tool named ${shortJson(name)}, so nothing ran. Call one of the tools listed for you.`;
 }

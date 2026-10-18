@@ -1,10 +1,15 @@
 {
   "name": "@animalabs/portal-protocol",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "type": "module",
   "main": "./dist/src/index.js",
   "types": "./dist/src/index.d.ts",
   "description": "Wire contract (WS events + RPC) shared by the portal relay and portal client. Pure types + lightweight guards; no runtime deps.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/anima-research/portal.git",
+    "directory": "portal-protocol"
+  },
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
@@ -13,10 +18,10 @@
   },
   "devDependencies": {
     "tsx": "^4.7.0",
-    "typescript": "^5.5.0",
+    "typescript": "^7.0.2",
     "@types/node": "^20.0.0"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22.12.0"
   }
 }

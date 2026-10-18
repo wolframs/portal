@@ -59,8 +59,22 @@ export type Scope =
 export interface AccessRole {
   caps: Capability[];
   scope: Scope;
-  /** Bind to a guild — required for `mirrorRole`; omit for global. */
-  guildId?: string;
+  /**
+   * The guild this role is scoped to — REQUIRED (2026-07-31): roles are
+   * guild-scoped, period. `scope:{all}` means all channels of THIS guild,
+   * never fleet-wide. Legacy unbound entries are dropped at load
+   * (fail-closed) with a console warning; setRole rejects them.
+   */
+  guildId: string;
+  /**
+   * Full-fidelity mirroring (mirror scopes only). When true, `caps` acts as a
+   * *mask*: the effective grant in a channel is `caps ∩ what the mirrored
+   * Discord role(s) can actually do there` (per-channel permission bits), not
+   * the flat `caps` list. So a persona mirroring @everyone can't post in a
+   * channel @everyone can only read. Default false: `caps` applies uniformly
+   * wherever the mirrored role can VIEW (visibility-only mirroring).
+   */
+  mirrorCaps?: boolean;
 }
 
 /**
@@ -71,6 +85,9 @@ export interface AccessRole {
 export interface PersonaEntry {
   roles?: string[];
   policy?: PersonaPolicy;
+  /** Guilds this persona was banned from (/ban). Nothing grants access there
+   *  until an admin of that guild grants it again, which lifts the ban. */
+  bans?: string[];
 }
 
 /** What a persona looks like on disk — new entry shape or a legacy inline policy. */
@@ -98,15 +115,18 @@ export interface InviteTemplate {
   /** Human label for the invite (e.g. "claude-code"). Optional. */
   label?: string;
   /**
-   * Access-role names granted to the new persona (RFC-004, preferred). Mutually
-   * exclusive with `grant`. Resolution is live, so `mirrorRole` roles track
-   * Discord visibility over time.
+   * Access-role names granted to the new persona (RFC-004, preferred).
+   * Resolution is live, so `mirrorRole` roles track Discord visibility over
+   * time. May be combined with `grant`: the persona then holds the union.
    */
   roles?: string[];
   /**
-   * Inline scoped grant (RFC-004). Mutually exclusive with `roles`. A
-   * `mirrorRole` scope here is snapshotted at enroll time into a channel list;
-   * use `roles` for live mirroring.
+   * Inline scoped grant (RFC-004), applied IN ADDITION to `roles` when both
+   * are present (`/invite` uses this to pin access to the channel it was run
+   * in, whatever the roles say). A mirror scope here is materialized at
+   * enroll/claim time into a shared content-addressed access role
+   * (`mirror-<hash>`), so it resolves live and tracks Discord visibility over
+   * time — including channels created later.
    */
   grant?: { caps: Capability[]; scope: Scope };
   /** Guild the inline `grant`/scope applies to (required for non-`all` scopes). */
@@ -134,6 +154,13 @@ export interface InviteTemplate {
    *   'both'    — either path is allowed.
    */
   mode?: 'mint' | 'augment' | 'both';
+  /**
+   * Persona that machine-minted this invite via the mint_invite RPC. Presence
+   * marks a machine mint: the subset-of-own-rights rule is re-verified against
+   * this persona at CLAIM time, so revoking/demoting the minter kills its
+   * outstanding unclaimed codes. Also forensic provenance in invites.json.
+   */
+  mintedBy?: string;
 }
 
 export interface InvitesFile {
@@ -143,6 +170,8 @@ export interface InvitesFile {
 export interface RolePoolConfig {
   size: number;
   prefix: string;
+  /** JSON file persisting persona->role ownership across restarts (optional). */
+  persistPath?: string;
 }
 
 /**
@@ -196,6 +225,14 @@ export interface RelayConfig {
   permissionsPath: string;
   /** Optional invites file. When set, agents may self-register via `register`. */
   invitesPath?: string;
+  /**
+   * Persona ids allowed to machine-mint invites via the mint_invite RPC
+   * (PORTAL_INVITE_MINTERS, comma-separated). Empty/absent = the RPC is
+   * disabled (fail closed) — same semantics as the guild allow-list store.
+   * Optional because absence and emptiness mean the same thing and existing
+   * config constructions (tests included) predate the field.
+   */
+  inviteMinters?: string[];
   /** Optional path to persist message attribution (id→persona/webhook). Enables
    *  per-persona edit/delete ownership of pre-restart messages. */
   attributionPath?: string;
@@ -210,6 +247,8 @@ export interface RelayConfig {
   rolePool: RolePoolConfig;
   webhookPoolSize: number;
   heartbeatIntervalMs: number;
+  /** Log gateway session lifecycle (identify/resume/close…) to stderr. */
+  sessionLog?: boolean;
   guildMembersIntent: boolean;
   /** Watch the identity/permissions files for external edits (default true). */
   watchConfig: boolean;
@@ -226,6 +265,21 @@ export interface RelayConfig {
   /** Prepend a quoted jump-link when a persona replies (webhooks can't carry a
    *  native Discord reply). Default true; set false to suppress the header. */
   replyLink: boolean;
+  /** ElevenLabs API key for voice transcription (Scribe v2 realtime).
+   *  Undefined ⇒ voice_join RPC returns UNAVAILABLE; no other effect. */
+  elevenLabsKey?: string;
+  /** Path to the voice-registry JSON (speaker → voice; see the voice-registry
+   *  repo). Together with elevenLabsKey this enables the voice OUTPUT path
+   *  (voice_speak, RFC-006 §1.4): the relay joins voice channels unmuted and
+   *  loads the wiring module. Undefined ⇒ voice_speak returns UNAVAILABLE;
+   *  transcription is unaffected. */
+  voiceRegistryPath?: string;
+  /** Grant authority stance for voice output. 'refuse-all' (default): no
+   *  floor service is deployed, so every voice_speak is refused with a
+   *  receipt — fail closed per RFC-006 §1.4. 'ungoverned': explicit operator
+   *  opt-in for floor-less rooms; the carrier gate becomes the only physics.
+   *  Never default to ungoverned. */
+  voiceOutputStance?: 'refuse-all' | 'ungoverned';
   /** Admin panel / HTTP API (RFC-005). Undefined ⇒ disabled. */
   admin?: AdminConfig;
 }
@@ -233,6 +287,9 @@ export interface RelayConfig {
 export function loadConfig(): RelayConfig {
   return {
     discordToken: requireEnv('DISCORD_TOKEN'),
+    elevenLabsKey: process.env.ELEVENLABS_KEY || undefined,
+    voiceRegistryPath: process.env.PORTAL_VOICE_REGISTRY || undefined,
+    voiceOutputStance: process.env.PORTAL_VOICE_OUTPUT === 'ungoverned' ? 'ungoverned' : 'refuse-all',
     wsPort: parseInt(process.env.PORTAL_WS_PORT ?? '8790', 10),
     avatarBaseUrl: (process.env.PORTAL_AVATAR_BASE_URL ?? '').replace(/\/$/, ''),
     guildIds: splitCsv(process.env.DISCORD_GUILD_ID),
@@ -240,6 +297,7 @@ export function loadConfig(): RelayConfig {
     identityPath: requireEnv('PORTAL_IDENTITY'),
     permissionsPath: requireEnv('PORTAL_PERMISSIONS'),
     invitesPath: process.env.PORTAL_INVITES || undefined,
+    inviteMinters: splitCsv(process.env.PORTAL_INVITE_MINTERS),
     attributionPath: process.env.PORTAL_ATTRIBUTION || undefined,
     readStatePath: process.env.PORTAL_READSTATE || undefined,
     readStatePingsCap: process.env.PORTAL_READSTATE_PINGS_CAP
@@ -251,9 +309,11 @@ export function loadConfig(): RelayConfig {
     rolePool: {
       size: parseInt(process.env.PORTAL_ROLE_POOL_SIZE ?? '50', 10),
       prefix: process.env.PORTAL_ROLE_POOL_PREFIX ?? 'portal-',
+      persistPath: process.env.PORTAL_ROLE_POOL_STATE,
     },
     webhookPoolSize: parseInt(process.env.PORTAL_WEBHOOK_POOL ?? '1', 10),
     heartbeatIntervalMs: parseInt(process.env.PORTAL_HEARTBEAT_MS ?? '30000', 10),
+    sessionLog: process.env.PORTAL_SESSION_LOG !== 'false',
     guildMembersIntent: process.env.PORTAL_GUILD_MEMBERS_INTENT !== 'false',
     watchConfig: process.env.PORTAL_WATCH_CONFIG !== 'false',
     historyCacheTtlMs: parseInt(process.env.PORTAL_HISTORY_CACHE_MS ?? '5000', 10),

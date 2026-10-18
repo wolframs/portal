@@ -34,8 +34,14 @@ export interface RegisterData {
   protocolVersion: ProtocolVersion;
   /** Invite code (template). Authorizes registration and sets the persona's caps. */
   invite: string;
-  /** Desired display name for the new persona. */
+  /** Desired display name for the new persona. The relay refuses a name that
+   *  reads like a human member's in any guild it serves. */
   desiredName: string;
+  /** Also refuse a name that reads like an existing persona's or a bot
+   *  member's. Set by runtime minting (where the model picks the name). Plain
+   *  self-enrollment leaves it off: an agent that lost its token re-enrolls
+   *  under its own name, and an agent may share its name with its own bot. */
+  uniqueName?: boolean;
   /** Optional avatar filename (resolved under the relay's base URL) or absolute URL. */
   avatar?: string;
   /** Ambient channel subscriptions to restore on connect. */
@@ -59,6 +65,10 @@ export interface HelloData {
 export interface ReadyData {
   sessionId: SessionId;
   persona: Persona;
+  /** Capability-filtered directory (portal#27): only guilds the persona holds
+   *  some capability in, and only channels it has at least one capability in
+   *  (threads follow their parent). A grant that later makes a channel visible
+   *  arrives as `guild_create` (if the guild was unknown) + `channel_update`. */
   guilds: PortalGuild[];
   channels: PortalChannel[];
   /** Highest event seq at ready — the resume baseline. */
@@ -91,6 +101,13 @@ export type ServerFrame =
   | { op: 'heartbeat_ack' }
   | { op: 'invalid_session'; d: InvalidSessionData }
   | { op: 'dispatch'; seq: number; d: PortalEvent }
+  /**
+   * Fire-and-forget dispatch: no seq, excluded from the replay stream by
+   * construction. Carries high-frequency display-only events (voice transcript
+   * partials) that would otherwise churn the resume buffer. Pre-v4 clients
+   * fail `isServerFrame` on the unknown op and drop it — safe by design.
+   */
+  | { op: 'dispatch_ephemeral'; d: PortalEvent }
   | { op: 'rpc_result'; d: RpcResponse };
 
 export type ClientOp = ClientFrame['op'];

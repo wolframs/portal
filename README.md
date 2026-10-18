@@ -27,6 +27,30 @@ Discord ⇄ portal-relay ⇄(WS: portal-protocol)⇄ portal-client ⇄ portal-mc
 > `mcpl-harness` (a stateful CLI/web MCPL host used to drive these servers in
 > testing) is a separate project, not part of this repo.
 
+## Browser / WebView clients
+
+`portal-client` ships two entries. The default (Node) entry uses the `ws`
+package; the **browser entry** uses the platform-native WHATWG WebSocket and
+touches no Node built-ins, so it bundles cleanly (Vite/esbuild pick it up via
+the `browser` export condition, or import `@animalabs/portal-client/browser`
+explicitly). Same client, same reconnect/resume/RPC — only the socket default
+and credential persistence differ:
+
+```ts
+import { PortalClient, loadOrEnroll, webStorageCredsStore } from '@animalabs/portal-client/browser';
+
+const creds = await loadOrEnroll(webStorageCredsStore(localStorage), {
+  url: 'wss://portal.animalabs.ai', invite: '<code>', desiredName: 'my-web-client',
+});
+const client = new PortalClient({ url: 'wss://portal.animalabs.ai', ...creds });
+await client.connect();
+```
+
+Credential persistence is pluggable (`CredsStore`) — `webStorageCredsStore`
+covers anything localStorage-shaped; supply your own for platform storage APIs
+(e.g. a smart-glasses companion-app WebView). The Node-only `loadOrEnrollCreds`
+(0600 creds file) is unchanged on the main entry.
+
 ## Run the relay
 
 ```bash
@@ -50,7 +74,11 @@ The bot needs **Manage Webhooks** + **Manage Roles** (admin is simplest), and it
 role must sit above the pooled roles. See `portal-relay/identity.example.json` /
 `permissions.example.json`. Other knobs: `PORTAL_INVITES`, `PORTAL_ATTRIBUTION`,
 `PORTAL_HISTORY_CACHE_MS`, `PORTAL_GUILD_MEMBERS_INTENT`, `PORTAL_WATCH_CONFIG`,
-`PORTAL_MAX_INLINE_BYTES`, `PORTAL_ALLOW_PATH_FILES`.
+`PORTAL_SESSION_LOG` (gateway session lifecycle lines on stderr; default on),
+`PORTAL_MAX_INLINE_BYTES`, `PORTAL_ALLOW_PATH_FILES`, `PORTAL_INVITE_MINTERS`
+(persona ids allowed to machine-mint single-use channel-scoped invites via the
+`mint_invite` RPC; empty/unset = disabled, and the delegated caps must be a
+subset of the minter's own effective caps on each scoped channel).
 
 ## Self-registration (invite templates)
 
@@ -120,11 +148,17 @@ ephemeral `--mcp-config`); dev channels go in
 
 ## connectome-host integration
 
-`portal-mcpl` is also a full MCPL server for connectome-host (recipe-driven
-agent host). It does the initialize handshake, `tools/list`, `tools/call` →
-`PortalAgent`, channel registration, `push/event` for inbound messages, and
-`channels/publish` → send (the host's locus-routing path). Stdio entry:
-`portal-mcpl/src/server-cli.ts`.
+`portal-mcpl` is also a full MCPL server for connectome-host. The host owns
+channel lifecycle in Chronicle: `channel_open` subscribes the Portal relay,
+`channel_close` unsubscribes it, and the state is restored without depending on
+Portal's local files. A ping in a closed channel is still delivered as a gated
+event so the agent can choose whether to open it (with optional backscroll) or
+acknowledge it with a visible reaction. Existing file-backed subscriptions are
+migrated once as `initiallyOpen` during `channels/register`.
+
+The legacy Portal subscription and reaction-visibility tools are hidden in this
+mode; they remain available in the standalone Claude Code channel mode. Stdio
+entry: `portal-mcpl/src/server-cli.ts`.
 
 ```
 connectome-host (one per agent recipe)
@@ -199,6 +233,31 @@ See `PORTAL-RFC-00{1,2,3}-*.md`.
 - **Two "seen"s** — transport resume (seq cursor, in the client) vs the durable
   agent watermark (in mcpl). Kept separate on purpose.
 
+### Vocabulary
+
+Portal has one kind of speaker: the **persona** — a persona id (unique), a
+display name and avatar (it posts through the relay's webhooks), a **token**
+(whoever holds it acts as the persona), its access, an addressing role per
+guild, and its own read-state. "Identity" in older code and file names means
+the same thing: `IdentityStore` / `identity.json` is the persona registry (the
+*who* half of a persona), the gateway's `identify` logs in as a persona, and
+portal-mcpl's roster (`<root>.identities.json`) lists the personas a process
+holds **credentials** (persona id + token) for. The persona tools are
+`list_personas` / `mint_persona` / `switch_persona` (the old `*_identity` names
+are still accepted); the MCPL feature set keeps its wire name `portal.identity`.
+
+Three different things are called roles:
+- **access roles** — portal's named permission templates (the admin panel's
+  Access roles tab, `/add-role`, invites' `roles`); a persona holds any number;
+- **Discord roles** — the server's own roles, which an access role can mirror
+  to decide which channels it covers (`mirror-…` access roles are created this
+  way from invites);
+- **addressing roles** — one mentionable `portal-…` role per persona per guild,
+  held by nobody, so humans can @-mention a persona.
+
+A **direct grant** is per-persona access to one channel (or a guild default)
+outside any access role — what `/add` sets.
+
 ### Identity & permissions — separate, live-editable stores
 
 - `IdentityStore` (`PORTAL_IDENTITY`) — *who*: `{id, displayName, avatar, token}`.
@@ -209,6 +268,27 @@ See `PORTAL-RFC-00{1,2,3}-*.md`.
   `relay.permissions.setChannel/…`) and **file hot-reload** (`fs.watchFile`,
   `PORTAL_WATCH_CONFIG`). Changes emit `persona_update` (+ live role rename) /
   `capabilities_update` to the persona's live sessions.
+- **Channels are addressed by label as well as id.** Every `channelId` tool
+  argument on the portal-mcpl surface accepts the label exactly as
+  `list_channels` prints it — `#name (Guild)` — or a bare `#name` when unique
+  across the persona's guilds, or a raw id / `portal:<id>`. Exact match,
+  case-insensitive, no fuzzy matching; an ambiguous name is an error quoting the
+  qualified labels (and ids when labels collide). Threads and categories stay
+  id-only. Ids remain the key (stable across renames, unique by construction);
+  what this removes is the id *monoculture*. Same doctrine and resolver as
+  discord-mcpl's `channel-names.ts`.
+- **Nothing is served that was not granted** (portal#27). The directory
+  (`ready`, `list_guilds`, `list_channels`) is capability-filtered: guilds the
+  persona holds some capability in, channels it holds at least one in (threads
+  follow their parent). Guild-level reads (`list_members`, `resolve_mentions`,
+  `list_roles`, `list_emojis`) are `FORBIDDEN` elsewhere; `set_typing` gates
+  like `send_message`, `unreact` like `react`; identify-time subscriptions pass
+  the `subscribe_channel` gate. And **every** delivery — addressed or ambient —
+  requires `VIEW_CHANNEL` in the source channel: pooled addressing roles are
+  mentionable guild-wide, so a mention from a channel the persona cannot view is
+  dropped, not delivered (live and as a pending ping). A later grant
+  materializes a hidden channel with `guild_create` (if the guild was unknown)
+  + `channel_update`; a revocation zeroes it with `capabilities_update: []`.
 
 ## Verification
 

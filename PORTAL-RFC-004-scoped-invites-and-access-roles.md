@@ -228,6 +228,24 @@ own caps; `mirrorRoles` is the compact, shared-caps form.)
 > within them. A later refinement could mirror finer-grained per-channel perms
 > (e.g. can-view-but-not-send) directly from Discord overwrites.
 
+**Full-fidelity mirroring (`mirrorCaps`, implemented 2026-07-14).** The
+refinement above exists as an opt-in flag on the access role:
+
+```
+{ caps, scope: { mirrorRole }, guildId, mirrorCaps: true }
+```
+
+With `mirrorCaps: true`, `caps` becomes a **mask**: the effective grant in a
+channel is `caps ∩ the caps the mirrored Discord role's permission bits support
+there` (post-overwrite, computed per channel by the mirror cache). So a persona
+mirroring `@everyone` can read-but-not-post exactly where members can —
+visibility-only mirroring would have let it post anywhere it could see, because
+the *bot's* perms (not the mirrored role's) are the only Discord-side clamp.
+`EDIT_OWN`/`DELETE_OWN` have no Discord permission bit (members always manage
+their own messages); they derive from the role's `SendMessages`. Union across
+`mirrorRoles` applies before the mask. Default (`false`/absent) keeps v1
+semantics — existing role catalogs are unaffected.
+
 ### 5.6 What this fixes, concretely
 
 - A `guest` invite → `guest` role scoped `{ channels: [<public ids>] }` → enrolled
@@ -270,8 +288,9 @@ P1 is independently shippable and is the security fix.
   multiple roles; default-deny outside scope; `mirrorRole` scope from a fake
   channel/role/overwrite fixture.
 - **Live (mirrors `scripts/p1-live.mjs`):** mint a `#test`-scoped invite; enroll;
-  assert `list_channels` shows the in-scope channel with caps **and** a private
-  channel with **empty** capabilities (and `fetch_history` on it → `FORBIDDEN`).
+  assert `list_channels` shows the in-scope channel with caps **and omits** the
+  private channel entirely (portal#27 — it used to appear with empty
+  capabilities, which leaked its name; `fetch_history` on it → `FORBIDDEN`).
   Then a `mirrorRole` role and assert scope matches the Discord role's visibility.
 - **Regression:** a legacy blanket-`caps` invite still works (as `scope:{all}`)
   but logs a deprecation warning.

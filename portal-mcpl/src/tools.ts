@@ -3,29 +3,43 @@
  * tools, adapted for the bridge: persona @-addressing, threads as first-class
  * targets, visible/invisible reactions, and read-state tools.
  */
+import { withToolClass } from './tool-classes.js';
+
 export interface ToolDefinition {
   name: string;
   description: string;
   inputSchema: { type: 'object'; properties: Record<string, unknown>; required?: string[] };
+  /** MCP extension metadata. Carries `mcpl/class` (MCPL RFC-008); other keys
+   *  must be merged alongside it, never replaced. */
+  _meta?: Record<string, unknown>;
 }
 
 const FILES_PROP = {
   type: 'array',
   description:
-    'Optional file attachments (up to 10; ~8 MiB total). This (portal) surface ' +
-    'takes inline base64 BYTES: provide each file as `bytes` (preferred — works ' +
-    'from anywhere) with a `name`. A host `path` works only if the relay is ' +
-    'configured to read path files. (The discord-mcpl surface is the opposite — ' +
-    'it uploads by host file PATH and does NOT accept base64 bytes.)',
+    'Optional file attachments (up to 10; ~8 MiB total). Each item is EITHER a ' +
+    'plain string (a local file path like "~/out/plot.png" or an http(s) URL) OR ' +
+    'an object with exactly one of `path` / `url` / `bytes`. Paths are read and ' +
+    'URLs fetched HERE on your host and uploaded for you — you never need to ' +
+    'base64 anything yourself. Local paths work only under the directories the ' +
+    'server allows (by default the working directory, the Claude Code project and its scratchpads). `name` defaults to the file/URL basename; ' +
+    '`contentType` is inferred from the extension. (The discord-mcpl surface ' +
+    'takes host paths only.)',
   items: {
-    type: 'object',
-    properties: {
-      bytes: { type: 'string', description: 'Base64-encoded file content (preferred)' },
-      name: { type: 'string', description: 'Display filename (required with bytes)' },
-      contentType: { type: 'string', description: 'Optional MIME type' },
-      path: { type: 'string', description: 'Path the relay can read (only if the relay allows path files)' },
-      description: { type: 'string', description: 'Optional alt-text' },
-    },
+    anyOf: [
+      { type: 'string', description: 'A local file path or an http(s) URL' },
+      {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'Local file path (absolute, ~-relative, or relative to the working dir)' },
+          url: { type: 'string', description: 'http(s) URL to fetch and attach' },
+          bytes: { type: 'string', description: 'Base64-encoded content (only if you already hold bytes)' },
+          name: { type: 'string', description: 'Display filename (required with bytes; inferred otherwise)' },
+          contentType: { type: 'string', description: 'Optional MIME type (inferred from name/response if omitted)' },
+          description: { type: 'string', description: 'Optional alt-text' },
+        },
+      },
+    ],
   },
 };
 
@@ -42,21 +56,24 @@ const RELAY_MESSAGE_ID_DESC =
   'tools need channelId+messageId together.)';
 
 const PORTAL_CHANNEL_ID_DESC =
-  'Portal channel (or thread) id. Surface marker: portal namespaces its MCPL ' +
-  'channels as `portal:<channelId>` (no guild segment; the snowflake is globally ' +
-  'unique) — a different id space from the discord-mcpl surface ' +
-  '(`discord:<guildId>:<channelId>`).';
+  'Channel reference. Accepts the label exactly as list_channels prints it — ' +
+  '`#name (Guild)` — or a bare `#name` when unique across your guilds, or a raw ' +
+  'channel/thread id (Discord snowflake or `portal:<channelId>`). Exact match, ' +
+  'case-insensitive, no fuzzy matching; an ambiguous name is an error listing ' +
+  'the qualified labels. Threads and categories are addressable by id only.';
 
-export const toolDefinitions: ToolDefinition[] = [
+const definitions: ToolDefinition[] = [
   {
     name: 'send_message',
     description:
       'Post a message to a channel or thread as your persona (via webhook). ' +
-      'Pass a thread channel id directly to post in a thread.',
+      'To post in a thread, pass its id as threadId with its parent as channelId, ' +
+      'or pass the thread channel id directly as channelId.',
     inputSchema: {
       type: 'object',
       properties: {
         channelId: { type: 'string', description: PORTAL_CHANNEL_ID_DESC },
+        threadId: { type: 'string', description: 'Target a thread under channelId' },
         content: { type: 'string', description: 'Message content (optional if files attached)' },
         files: FILES_PROP,
         replyToId: { type: 'string', description: 'Relay message id to reply to (rendered as a quoted link)' },
@@ -261,8 +278,9 @@ export const toolDefinitions: ToolDefinition[] = [
     name: 'list_members',
     description:
       'List guild members (for authorization gating / mention handling). Optional ' +
-      'case-insensitive query filter. Returns membersAvailable=false if the relay ' +
-      'bot lacks the GuildMembers intent (results then partial).',
+      'case-insensitive query filter. Returns membersAvailable=false when the ' +
+      'relay cannot see the full roster (no GuildMembers intent, or its member ' +
+      'cache is still short of the guild member count) — results are then partial.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -304,6 +322,71 @@ export const toolDefinitions: ToolDefinition[] = [
       type: 'object',
       properties: { channelId: { type: 'string', description: PORTAL_CHANNEL_ID_DESC } },
       required: ['channelId'],
+    },
+  },
+  {
+    name: 'voice_join',
+    description:
+      'Ask the relay to join a voice channel and transcribe speech there ' +
+      '(ElevenLabs Scribe). Final transcripts appear in your context as ' +
+      '[voice] lines for channels you have open; they never wake you. ' +
+      'Requires the VOICE_LISTEN capability in that channel, which list_channels ' +
+      "shows in each channel's capabilities. The relay listens in at most ONE " +
+      'voice channel per guild, shared by everyone: joining a second channel in ' +
+      'that guild is refused until someone calls voice_leave on the first. ' +
+      'Listening can also end on its own (channel deleted, bot moved, ' +
+      'voice server lost) — a "[voice] transcription stopped" line reports it; ' +
+      'call voice_join again to resume.',
+    inputSchema: {
+      type: 'object',
+      properties: { channelId: { type: 'string', description: PORTAL_CHANNEL_ID_DESC } },
+      required: ['channelId'],
+    },
+  },
+  {
+    name: 'voice_leave',
+    description:
+      'Ask the relay to stop listening in a voice channel. The listener is ' +
+      'shared: this stops transcription for every agent following that channel.',
+    inputSchema: {
+      type: 'object',
+      properties: { channelId: { type: 'string', description: PORTAL_CHANNEL_ID_DESC } },
+      required: ['channelId'],
+    },
+  },
+  {
+    name: 'voice_speak',
+    description:
+      'Speak text aloud in a voice channel, in your registered voice, through ' +
+      'the relay\'s grant-checked TTS output path. The relay must already be ' +
+      'joined there (voice_join) and you need the VOICE_SPEAK capability. The ' +
+      'call returns once your utterance is QUEUED; synthesis waits until the ' +
+      'room\'s audio is clear (words wait patiently — nothing plays over live ' +
+      'speech), and the outcome arrives later as a [voice] receipt line: ' +
+      'spoken, interrupted (with exactly which words were heard and which were ' +
+      'cut off — yours to re-say or let go), refused (no valid floor grant; on ' +
+      'an ungoverned relay grants are not required), or error. Anything ' +
+      'refused or dropped before it started playing cost nothing.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        channelId: { type: 'string', description: PORTAL_CHANNEL_ID_DESC },
+        text: {
+          type: 'string',
+          description: 'What to say — one conversational turn (≤2000 chars).',
+        },
+        requestId: {
+          type: 'string',
+          description: 'Optional tracking key echoed on the receipt (unique per request).',
+        },
+        grant: {
+          type: 'object',
+          description:
+            'Floor grant authorizing this utterance (grantId, roomBinding, ' +
+            'logicEpoch, processEpoch, expiresAt). Omit on ungoverned relays.',
+        },
+      },
+      required: ['channelId', 'text'],
     },
   },
   {
@@ -353,3 +436,10 @@ export const toolDefinitions: ToolDefinition[] = [
     },
   },
 ];
+
+/**
+ * The served tool surface. Every definition carries its MCPL RFC-008 class in
+ * `_meta` (see tool-classes.ts). Both tools/list paths — the MCPL server and the
+ * Claude Code channel — serve these objects via `PortalAgent.tools`.
+ */
+export const toolDefinitions: ToolDefinition[] = definitions.map(withToolClass);

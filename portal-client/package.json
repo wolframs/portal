@@ -1,10 +1,26 @@
 {
   "name": "@animalabs/portal-client",
-  "version": "0.3.0",
+  "version": "0.5.0",
   "type": "module",
   "main": "./dist/src/index.js",
   "types": "./dist/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "browser": "./dist/src/index.browser.js",
+      "default": "./dist/src/index.js"
+    },
+    "./browser": {
+      "types": "./dist/src/index.browser.d.ts",
+      "default": "./dist/src/index.browser.js"
+    }
+  },
   "description": "General-purpose portal client: WS transport, client-side cache, typed RPC, reconnect/resume.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/anima-research/portal.git",
+    "directory": "portal-client"
+  },
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
@@ -12,16 +28,16 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@animalabs/portal-protocol": "^0.3.0",
+    "@animalabs/portal-protocol": "^0.4.0",
     "ws": "^8.18.0"
   },
   "devDependencies": {
-    "tsx": "^4.7.0",
-    "typescript": "^5.5.0",
     "@types/node": "^20.0.0",
-    "@types/ws": "^8.5.0"
+    "@types/ws": "^8.5.0",
+    "tsx": "^4.7.0",
+    "typescript": "^7.0.2"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22.12.0"
   }
 }
