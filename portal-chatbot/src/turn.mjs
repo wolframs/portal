@@ -2,7 +2,7 @@
 // call metered after. Transport-free: the Portal client, the HTTP call and the
 // clock are passed in, so the whole turn runs under test with fakes.
 import { HOLD_NOTICE } from './gate.mjs';
-import { appendSpend, callDollars } from './meter.mjs';
+import { appendSpend, callDollars, normalizeUsage } from './meter.mjs';
 import { authorName, renderTranscript } from './transcript.mjs';
 
 export function chatMessages({ system, transcript, trigger, personaName }) {
@@ -37,9 +37,10 @@ export async function answer(o) {
   const channel = trigger.threadId ?? trigger.channelId;
 
   const holdNotice = async (reason) => {
-    if (!gate.needsNotice(channel)) return { outcome: 'held-quiet', reason };
+    const day = gate.today(); // the notice's own day, carried through a slow send
+    if (!gate.needsNotice(channel, day)) return { outcome: 'held-quiet', reason };
     await o.send(HOLD_NOTICE);
-    gate.markNoticed(channel); // only once the notice is actually out
+    gate.markNoticed(channel, day); // only once the notice is actually out
     log(`holding (${reason}); noticed ${channel}`);
     return { outcome: 'held', reason };
   };
@@ -59,8 +60,9 @@ export async function answer(o) {
       personaName: o.personaName,
     });
 
+    // Only a metered route (one with a gate) is priced; the no-route
+    // OpenRouter path has no prices and writes no ledger.
     const meter = (fields) => {
-      if (!gate) return;
       appendSpend(spendDir, route.name, {
         ts: now().toISOString(),
         route: route.name,
@@ -77,27 +79,27 @@ export async function answer(o) {
       res = await o.complete(messages);
     } catch (e) {
       // No response at all: the request may still have been served and billed.
-      const { dollars } = estimate(null);
-      meter({ status: null, error: String(e?.message || e), usage: null, usage_reported: false, estimated: true, dollars });
+      if (gate) {
+        const { dollars } = estimate(null);
+        meter({ status: null, error: String(e?.message || e), usage: null, usage_reported: false, estimated: true, dollars });
+      }
       throw e;
     }
 
-    if (res.ok) {
-      const { dollars, estimated, tokens } = estimate(res.usage);
-      meter({
-        status: res.status, request_id: res.requestId, response_id: res.responseId,
-        usage: res.usage, usage_reported: !estimated, tokens, estimated, dollars,
-      });
-    } else {
-      // The marketplace does not bill a request it refused or failed; any
-      // usage an error body does carry is still priced.
-      const priced = res.usage ? estimate(res.usage) : null;
-      const counted = priced && !priced.estimated ? priced : null;
-      meter({
-        status: res.status, request_id: res.requestId, response_id: res.responseId,
-        usage: res.usage, usage_reported: Boolean(counted), tokens: counted?.tokens ?? null,
-        estimated: false, dollars: counted?.dollars ?? 0, error: res.errorText,
-      });
+    if (gate) {
+      const ids = { status: res.status, request_id: res.requestId ?? null, response_id: res.responseId ?? null };
+      if (res.status >= 400 && res.status < 500) {
+        // A refusal the endpoint answered (402 or another 4xx) is not billed.
+        meter({ ...ids, usage: res.usage ?? null, usage_reported: normalizeUsage(res.usage) !== null, tokens: null, estimated: false, dollars: 0, error: res.errorText });
+      } else {
+        // A reply, a 5xx or any other answer may have been served: its reported
+        // usage is priced, and without usable usage it is charged the estimate.
+        const { dollars, estimated, tokens } = estimate(res.usage);
+        meter({
+          ...ids, usage: res.usage ?? null, usage_reported: !estimated, tokens, estimated, dollars,
+          ...(res.ok ? {} : { error: res.errorText }),
+        });
+      }
     }
 
     if (res.status === 402 && gate) {

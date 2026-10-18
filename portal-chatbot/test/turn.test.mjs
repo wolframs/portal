@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import { BudgetGate, HOLD_NOTICE } from '../src/gate.mjs';
 import { complete as httpComplete } from '../src/llm.mjs';
 import { appendSpend } from '../src/meter.mjs';
-import { resolveRoute } from '../src/routes.mjs';
+import { legacyRoute, resolveRoute } from '../src/routes.mjs';
 import { answer, serial } from '../src/turn.mjs';
 
 const ROUTE = resolveRoute('argon', {}, {
@@ -157,11 +157,72 @@ test('a call that never got a response is charged the estimate and rethrown', as
   assert.match(e.error, /ECONNRESET/);
 });
 
-test('other HTTP errors are logged at zero, thrown, and do not hold', async () => {
+test('a 4xx the endpoint answered is recorded at $0, even with usage in the body, thrown, and does not hold', async () => {
+  const h = harness({ reply: () => ({ ok: false, status: 429, reply: null, usage: { prompt_tokens: 1000, completion_tokens: 100 }, errorText: 'slow down' }) });
+  await assert.rejects(h.run(trigger('c1')), /429: slow down/);
+  const [e] = h.ledger();
+  assert.equal(e.dollars, 0);
+  assert.equal(e.estimated, false);
+  assert.equal(h.gate().holdReason(), null);
+});
+
+test('a 5xx is charged the estimate (it may have been served), thrown, and does not hold', async () => {
   const h = harness({ reply: () => ({ ok: false, status: 503, reply: null, usage: null, errorText: 'no seller' }) });
   await assert.rejects(h.run(trigger('c1')), /503: no seller/);
-  assert.equal(h.ledger()[0].dollars, 0);
+  const [e] = h.ledger();
+  assert.equal(e.estimated, true);
+  assert.ok(Math.abs(e.dollars - (2048 * 10e-6 + Math.ceil(e.prompt_chars / 3) * 2e-6)) < 1e-12);
   assert.equal(h.gate().holdReason(), null);
+});
+
+test('a 5xx whose body reports usage is priced from that usage', async () => {
+  const h = harness({ reply: () => ({ ok: false, status: 502, reply: null, usage: { prompt_tokens: 1000, completion_tokens: 100 }, errorText: 'upstream' }) });
+  await assert.rejects(h.run(trigger('c1')), /502/);
+  const [e] = h.ledger();
+  assert.equal(e.estimated, false);
+  assert.ok(Math.abs(e.dollars - (1000 * 2e-6 + 100 * 10e-6)) < 1e-12);
+});
+
+test('the no-route OpenRouter path (no prices, no gate) replies and writes no ledger', async () => {
+  const h = harness();
+  const openrouter = legacyRoute({});
+  assert.equal(openrouter.price, null);
+  const r = await h.run(trigger('c1'), { route: openrouter, gate: null });
+  assert.deepEqual(r, { outcome: 'replied', chars: 5 });
+  assert.deepEqual(h.sent, [{ channel: 'c1', content: 'hello' }]);
+  assert.throws(() => h.ledger(), /ENOENT/);
+  // its errors are still thrown, unpriced
+  await assert.rejects(h.run(trigger('c1'), { route: openrouter, gate: null, complete: async () => ({ ok: false, status: 503, errorText: 'down' }) }), /503: down/);
+  await assert.rejects(h.run(trigger('c1'), { route: openrouter, gate: null, complete: async () => { throw new Error('ECONNRESET'); } }), /ECONNRESET/);
+  assert.throws(() => h.ledger(), /ENOENT/);
+});
+
+test('a 402 whose body cannot be read still holds the route', async () => {
+  const unreadable = async () => ({
+    ok: false, status: 402, headers: new Map([['x-request-id', 'req-u']]), text: async () => { throw new Error('socket hang up'); },
+  });
+  const h = harness();
+  const r = await h.run(trigger('c1'), { complete: (messages) => httpComplete(ROUTE, 'k', messages, unreadable) });
+  assert.equal(r.outcome, 'held');
+  assert.match(r.reason, /402/);
+  const [e] = h.ledger();
+  assert.equal(e.status, 402);
+  assert.equal(e.dollars, 0);
+  assert.equal(e.request_id, 'req-u');
+  assert.match(h.gate().holdReason(), /402/);
+});
+
+test('a notice posted before 00:00 UTC and acknowledged after it marks the old day, not the new', async () => {
+  const h = harness({ c: clock('2026-10-18T23:59:59.500Z') });
+  appendSpend(h.dir, 'argon', { ts: '2026-10-18T22:00:00Z', dollars: 0.3 });
+  const slowSend = async () => { h.c.t = new Date('2026-10-19T00:00:01Z'); };
+  assert.equal((await h.run(trigger('c1'), { send: slowSend })).outcome, 'held');
+
+  // the new day reaches its own cap: c1 must hear that day's notice
+  appendSpend(h.dir, 'argon', { ts: '2026-10-19T00:00:02Z', dollars: 0.3 });
+  h.c.t = new Date('2026-10-19T00:00:03Z');
+  assert.equal((await h.run(trigger('c1'))).outcome, 'held');
+  assert.deepEqual(h.sent, [{ channel: 'c1', content: HOLD_NOTICE }]);
 });
 
 test('the window bounds what is sent: context_chars of history plus the system prompt', async () => {
@@ -205,6 +266,14 @@ test('llm.complete posts to the route URL, sends only allowed fields, and reads 
   assert.equal(r402.status, 402);
   assert.equal(r402.requestId, 'req-b');
   assert.match(r402.errorText, /budget_exceeded/);
+
+  const torn = await httpComplete(ROUTE, 'k', [], async () => ({
+    ok: false, status: 402, headers: new Map(), text: async () => { throw new Error('aborted'); },
+  }));
+  assert.equal(torn.ok, false);
+  assert.equal(torn.status, 402);
+  assert.equal(torn.usage, null);
+  assert.match(torn.errorText, /body unreadable: aborted/);
 });
 
 test('serial() runs jobs one at a time and survives a failing job', async () => {

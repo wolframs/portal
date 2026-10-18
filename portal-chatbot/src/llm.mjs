@@ -15,15 +15,22 @@ export function buildBody(route, messages) {
 const requestIdOf = (res, body) =>
   res.headers?.get?.('x-request-id') ?? body?.request_id ?? body?.error?.request_id ?? null;
 
-/** POST the completion. Resolves (never rejects on an HTTP status) with what
- *  the meter needs; rejects only when no response arrived at all. */
+/** POST the completion. Resolves (never rejects on an HTTP status, readable
+ *  body or not) with what the meter needs; rejects only when no response
+ *  arrived at all. */
 export async function complete(route, key, messages, fetchImpl = fetch) {
   const res = await fetchImpl(`${route.baseUrl}/chat/completions`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(buildBody(route, messages)),
   });
-  const text = await res.text();
+  // A body that cannot be read must not lose the status: a 402 still holds.
+  let text;
+  try {
+    text = await res.text();
+  } catch (e) {
+    text = `(body unreadable: ${e?.message || e})`;
+  }
   let body = null;
   try {
     body = JSON.parse(text);

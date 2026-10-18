@@ -85,18 +85,27 @@ as reported, `usage_reported`, `tokens` (the disjoint counts priced),
   `prompt_tokens_details.cached_tokens` (and `cache_write_tokens`) are inside
   `prompt_tokens` and subtracted from it; Anthropic-style top-level
   `cache_read_input_tokens` / `cache_creation_input_tokens` are taken as
-  separate. Reasoning tokens are inside completion and not added again. A
+  separate. A cache count reported both ways is charged once: the nested
+  figure wins when it is above 0, else the top-level one is used. Reasoning
+  tokens are inside completion and not added again. A
   `/min70` call is counted at full catalogue price — this is not what Surplus
   billed.
-- **No usage** (a 200 without `usage`, or a request that got no response) is
-  recorded with `usage_reported: false` and charged `max_tokens` × completion
-  + sent prompt characters / 3 × prompt. An HTTP error the marketplace
-  answered (402, 5xx) is recorded at 0.
+- **Errors**: a 402 or other 4xx the endpoint answered is recorded at $0
+  (the marketplace does not bill a refusal). A 5xx is priced from any usage
+  its body reports, like a reply.
+- **No usage** (a 200 or 5xx without usable `usage`, or a request that got
+  no response) is recorded with `usage_reported: false` and charged
+  `max_tokens` × completion + sent prompt characters / 3 × prompt.
+- **A torn last line** (a crash mid-write) is closed off before the next
+  entry is appended; the cap sum skips any malformed line and says so on
+  stderr.
 - **The cap**: before answering, today's (UTC) dollars for the route are
   summed from its file. At or over `daily_usd`, or after a 402 from the
   endpoint today, the persona posts *"Daily model budget reached; back at
   00:00 UTC."* once per channel (a thread counts as its own channel) and is
-  silent there until the reset. No retry on 402, no fallback endpoint. The
+  silent there until the reset. A notice belongs to the UTC day it was
+  decided on, even if its send completes after midnight. Any 402 holds,
+  readable body or not. No retry on 402, no fallback endpoint. The
   hold and the noticed channels are kept in
   `CHATBOT_SPEND_DIR/<route>.state.json`, so a restart does not repeat
   either.

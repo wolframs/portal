@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, appendFileSync } from 'node:fs';
+import { mkdtempSync, appendFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -29,6 +29,21 @@ test('OpenRouter-style cache_write_tokens inside prompt_tokens are priced at the
 test('Anthropic-style top-level cache fields are disjoint from input_tokens', () => {
   const usage = { input_tokens: 100, output_tokens: 50, cache_read_input_tokens: 4000, cache_creation_input_tokens: 2000 };
   assert.deepEqual(normalizeUsage(usage), { fresh: 100, read: 4000, write: 2000, output: 50 });
+});
+
+test('cache counts reported both nested and top-level are charged once, nested first', () => {
+  const both = {
+    prompt_tokens: 10000, completion_tokens: 0,
+    prompt_tokens_details: { cached_tokens: 8000, cache_write_tokens: 1000 },
+    cache_read_input_tokens: 8000, cache_creation_input_tokens: 1000,
+  };
+  assert.deepEqual(normalizeUsage(both), { fresh: 1000, read: 8000, write: 1000, output: 0 });
+  close(callDollars(ARGON, both, { maxTokens: 2048, promptChars: 0 }).dollars, 1000 * 2e-6 + 8000 * 0.1e-6 + 1000 * 0.1875e-6);
+});
+
+test('a nested cache count of zero gives way to a top-level one, taken as disjoint', () => {
+  const usage = { prompt_tokens: 100, completion_tokens: 0, prompt_tokens_details: { cached_tokens: 0 }, cache_read_input_tokens: 4000 };
+  assert.deepEqual(normalizeUsage(usage), { fresh: 100, read: 4000, write: 0, output: 0 });
 });
 
 test('reasoning tokens are inside completion and not added twice', () => {
@@ -70,4 +85,31 @@ test('a torn line is skipped with a warning, not fatal', () => {
   const warned = [];
   close(spentToday(dir, 'flash', new Date('2026-10-18T12:00:00Z'), (w) => warned.push(w)), 0.1);
   assert.equal(warned.length, 1);
+});
+
+test('an entry appended after an unterminated last line is not swallowed by it', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'chatbot-spend-'));
+  appendSpend(dir, 'flash', { ts: '2026-10-18T10:00:00Z', dollars: 0.1 });
+  appendFileSync(join(dir, 'flash.jsonl'), '{"ts":"2026-10-18T1'); // a crash mid-write
+  appendSpend(dir, 'flash', { ts: '2026-10-18T11:00:00Z', dollars: 0.05 }); // after the restart
+  const warned = [];
+  close(spentToday(dir, 'flash', new Date('2026-10-18T12:00:00Z'), (w) => warned.push(w)), 0.15);
+  assert.equal(warned.length, 1);
+  assert.match(warned[0], /\{"ts":"2026-10-18T1$/);
+  assert.equal(readFileSync(join(dir, 'flash.jsonl'), 'utf8').split('\n').length, 4); // three lines and the final newline
+});
+
+test('without a warn callback, a malformed spend line is reported on stderr', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'chatbot-spend-'));
+  appendFileSync(join(dir, 'flash.jsonl'), 'not json\n{"ts":"2026-10-18T10:00:00Z","dollars":0.1}\n');
+  const written = [];
+  const real = process.stderr.write;
+  process.stderr.write = (chunk, ...rest) => (written.push(String(chunk)), true);
+  try {
+    close(spentToday(dir, 'flash', new Date('2026-10-18T12:00:00Z')), 0.1);
+  } finally {
+    process.stderr.write = real;
+  }
+  assert.equal(written.length, 1);
+  assert.match(written[0], /unreadable spend line.*not json/);
 });
