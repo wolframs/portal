@@ -1,0 +1,43 @@
+{
+  "_comment": "Route table for portal-chatbot (README.md, 'Routes'). Copy to ~/Projects/portal-runtime/routes.json. Prices are USD per million tokens from the Surplus catalogue snapshot of 2026-10-18 (si-catalogue-20261018.json); allowed_params are each model's supported_parameters minus tools, tool_choice, include_reasoning, response_format and structured_outputs (text-only persona). Keys starting with '_' are comments.",
+  "defaults": {
+    "base_url": "https://api.surplusintelligence.ai/v1",
+    "key_env": "SURPLUS_DISCORD_API_KEY",
+    "key_file": "~/Projects/shimmer-discord/.env.surplus-discord",
+    "max_tokens": 2048,
+    "context_chars": 75000,
+    "extra": {
+      "_comment": "Optional top-level body fields: provider, providers_blocked, provider_order, si_route. Unset means Surplus's default routing."
+    }
+  },
+  "routes": {
+    "argon": {
+      "model": "gemini-4-argon",
+      "base_url": "https://api.surplusintelligence.ai/min70/v1",
+      "daily_usd": 0.30,
+      "usd_per_mtok": { "prompt": 2.0, "completion": 10.0, "cache_read": 0.1, "cache_write": 0.1875 },
+      "allowed_params": ["max_tokens", "reasoning", "reasoning_effort", "seed", "stop", "temperature", "top_p"]
+    },
+    "wonder": {
+      "_comment": "Muse Wonder advertises no 'stop' parameter.",
+      "model": "muse-wonder",
+      "base_url": "https://api.surplusintelligence.ai/min70/v1",
+      "daily_usd": 0.30,
+      "usd_per_mtok": { "prompt": 4.0, "completion": 20.0, "cache_read": 0.2, "cache_write": 4.0 },
+      "allowed_params": ["max_tokens", "reasoning", "reasoning_effort", "repetition_penalty", "temperature", "top_k", "top_p"]
+    },
+    "mimo": {
+      "_comment": "MiMo accepts 'reasoning' but not 'reasoning_effort'.",
+      "model": "mimo-v2.6-pro",
+      "daily_usd": 0.15,
+      "usd_per_mtok": { "prompt": 0.435, "completion": 0.87, "cache_read": 0.0036, "cache_write": 0.435 },
+      "allowed_params": ["frequency_penalty", "max_tokens", "presence_penalty", "reasoning", "stop", "temperature", "top_p"]
+    },
+    "flash": {
+      "model": "gemini-3.8-flash",
+      "daily_usd": 0.25,
+      "usd_per_mtok": { "prompt": 0.825, "completion": 4.125, "cache_read": 0.0825, "cache_write": 0.0417 },
+      "allowed_params": ["max_tokens", "reasoning", "reasoning_effort", "seed", "stop", "temperature", "top_p"]
+    }
+  }
+}
